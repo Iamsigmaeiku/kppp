@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:DECODER_HOST=\"10.10.100.254\"; python -m services.decoder_ingest.main --dry-run)",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\")",
+      "Bash(python -c \"import fastapi, uvicorn, websockets; print\\('ok'\\)\")",
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'decoder_ingest' } | Select-Object ProcessId, CommandLine | Format-List)",
+      "PowerShell(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 8000,8010,8020 } | Select-Object LocalPort, OwningProcess)",
+      "PowerShell(Stop-Process -Id 33584 -Force; Start-Sleep -Milliseconds 500; Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq 8010 })",
+      "Bash(rm -f \"C:\\\\Users\\\\evand\\\\Desktop\\\\kpp\\\\.claude\\\\launch.json\"; rmdir \"C:\\\\Users\\\\evand\\\\Desktop\\\\kpp\\\\.claude\" 2>/dev/null; echo done)"
+    ]
+  }
+}

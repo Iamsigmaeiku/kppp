@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TKS Dashboard</title>
+  <style>
+    :root {
+      --bg: #0a0f1c;
+      --bg-gradient: radial-gradient(1200px 600px at 10% -10%, #10192e 0%, #0a0f1c 55%);
+      --panel: #121a2b;
+      --panel-alt: #0e1524;
+      --border: #21304a;
+      --border-soft: #1a2538;
+      --text: #e7ecf5;
+      --text-dim: #8b98b3;
+      --text-faint: #5c6a86;
+      --accent: #38bdf8;
+      --accent-dim: #1c4a63;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --err: #f87171;
+      --gold: #f5c542;
+      --silver: #cbd5e1;
+      --bronze: #d98a4f;
+      --radius: 12px;
+      --shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+      margin: 0;
+      padding: 1.25rem;
+      background: var(--bg-gradient), var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    h1 {
+      font-size: 1.85rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      margin: 0;
+      background: linear-gradient(135deg, #ffffff, #9fb4d8);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    h1 .sub {
+      display: block;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.3em;
+      color: var(--text-faint);
+      -webkit-text-fill-color: var(--text-faint);
+      margin-top: 0.15rem;
+    }
+
+    /* ---- status pill ---- */
+    #status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.9rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+    }
+    #status .dot {
+      width: 0.55rem;
+      height: 0.55rem;
+      border-radius: 50%;
+      background: var(--text-faint);
+      box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.04);
+    }
+    #status.ok { color: var(--ok); border-color: rgba(52, 211, 153, 0.35); }
+    #status.ok .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+    #status.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.35); }
+    #status.warn .dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+    #status.err { color: var(--err); border-color: rgba(248, 113, 113, 0.35); }
+    #status.err .dot { background: var(--err); animation: pulse-dot 1s ease-in-out infinite; }
+
+    #resetBtn {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.4rem 0.9rem;
+      cursor: pointer;
+    }
+    #resetBtn:hover { color: var(--err); border-color: var(--err); }
+    #resetBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    /* ---- unregistered badge (topbar) ---- */
+    #unregisteredBadge {
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.9rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      background: rgba(251, 191, 36, 0.12);
+      border: 1px solid rgba(251, 191, 36, 0.45);
+      color: var(--warn);
+      animation: pulse-dot 1.4s ease-in-out infinite;
+    }
+    #unregisteredBadge.show { display: inline-flex; }
+
+    /* ---- leaderboard card ---- */
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      max-width: 100vw;
+    }
+
+    table {
+      width: 100%;
+      min-width: 780px;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 1.05rem;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--panel-alt);
+      color: var(--text-faint);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-align: left;
+      padding: 0.7rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    tbody td {
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--border-soft);
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    tbody tr {
+      transition: background-color 0.25s ease;
+    }
+    tbody tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.015);
+    }
+    tbody tr:hover {
+      background: rgba(56, 189, 248, 0.06);
+    }
+    tbody tr:last-child td { border-bottom: none; }
+
+    tr.rank-1 { background: linear-gradient(90deg, rgba(245, 197, 66, 0.14), rgba(245, 197, 66, 0.02) 70%); box-shadow: inset 3px 0 0 var(--gold); }
+    tr.rank-2 { background: linear-gradient(90deg, rgba(203, 213, 225, 0.10), rgba(203, 213, 225, 0.02) 70%); box-shadow: inset 3px 0 0 var(--silver); }
+    tr.rank-3 { background: linear-gradient(90deg, rgba(217, 138, 79, 0.12), rgba(217, 138, 79, 0.02) 70%); box-shadow: inset 3px 0 0 var(--bronze); }
+    tr.rank-1:hover, tr.rank-2:hover, tr.rank-3:hover { filter: brightness(1.08); }
+
+    .rank-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 1.6rem;
+      height: 1.6rem;
+      padding: 0 0.35rem;
+      border-radius: 6px;
+      font-weight: 800;
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    tr.rank-1 .rank-badge { background: var(--gold); color: #2b2205; }
+    tr.rank-2 .rank-badge { background: var(--silver); color: #1b2230; }
+    tr.rank-3 .rank-badge { background: var(--bronze); color: #2b1707; }
+
+    .car {
+      font-weight: 700;
+      font-size: 1.15rem;
+    }
+    tr.unregistered .car::after { content: " 未配對"; font-size: 0.65rem; font-weight: 600; color: var(--warn); margin-left: 0.4rem; padding: 0.1rem 0.4rem; border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 999px; }
+    tr.unregistered td { color: var(--warn); }
+
+    .tid, .raw {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+    }
+    .raw { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; color: var(--text-faint); }
+
+    .laps { font-variant-numeric: tabular-nums; color: var(--text-dim); }
+    .last, .best { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .best { color: var(--accent); }
+
+    .timer {
+      font-variant-numeric: tabular-nums;
+      font-weight: 800;
+      font-size: 1.65rem;
+      color: var(--ok);
+      text-shadow: 0 0 14px rgba(52, 211, 153, 0.35);
+    }
+    .timer .timer-badge {
+      display: none;
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--text-faint);
+      margin-left: 0.5rem;
+      vertical-align: middle;
+      text-shadow: none;
+    }
+    .timer.paused {
+      color: var(--text-faint);
+      text-shadow: none;
+    }
+    .timer.paused .timer-badge {
+      display: inline-block;
+    }
+    .timer.paused .timer-badge::before {
+      content: "⏸ ";
+    }
+    .timer.paused .timer-badge::after {
+      content: "已暫停";
+    }
+
+    /* ---- captures (collapsible) ---- */
+    details#capturesPanel {
+      margin-top: 1.25rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    details#capturesPanel summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 0.9rem 1.1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      user-select: none;
+    }
+    details#capturesPanel summary::-webkit-details-marker { display: none; }
+    details#capturesPanel summary::before {
+      content: "▸";
+      display: inline-block;
+      transition: transform 0.15s ease;
+      color: var(--text-faint);
+    }
+    details#capturesPanel[open] summary::before { transform: rotate(90deg); }
+    #captureMeta {
+      margin-left: auto;
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: normal;
+      color: var(--text-faint);
+      font-size: 0.75rem;
+    }
+    #captures {
+      list-style: none;
+      padding: 0 1.1rem 0.75rem;
+      margin: 0;
+      max-height: 14rem;
+      overflow-y: auto;
+      border-top: 1px solid var(--border-soft);
+    }
+    #captures li {
+      font-family: ui-monospace, monospace;
+      font-size: 0.85rem;
+      padding: 0.4rem 0;
+      border-bottom: 1px solid var(--border-soft);
+      color: var(--text-dim);
+    }
+    #captures li:last-child { border-bottom: none; }
+    #captures .ts { color: var(--text-faint); margin-right: 0.75rem; }
+
+    /* ---- unregistered transponders panel ---- */
+    details#unregisteredPanel {
+      margin-top: 1.25rem;
+      background: var(--panel);
+      border: 1px solid rgba(251, 191, 36, 0.35);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    details#unregisteredPanel summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 0.9rem 1.1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--warn);
+      user-select: none;
+    }
+    details#unregisteredPanel summary::-webkit-details-marker { display: none; }
+    details#unregisteredPanel summary::before {
+      content: "▸";
+      display: inline-block;
+      transition: transform 0.15s ease;
+      color: var(--warn);
+    }
+    details#unregisteredPanel[open] summary::before { transform: rotate(90deg); }
+    #unregisteredMeta {
+      margin-left: auto;
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: normal;
+      color: var(--text-faint);
+      font-size: 0.75rem;
+    }
+    #unregisteredEmpty {
+      padding: 0.75rem 1.1rem 1rem;
+      font-size: 0.85rem;
+      color: var(--text-faint);
+      border-top: 1px solid var(--border-soft);
+    }
+    table.unreg-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 0.92rem;
+      border-top: 1px solid var(--border-soft);
+    }
+    table.unreg-table th {
+      text-align: left;
+      padding: 0.55rem 1.1rem;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+      background: var(--panel-alt);
+    }
+    table.unreg-table td {
+      padding: 0.5rem 1.1rem;
+      border-top: 1px solid var(--border-soft);
+      vertical-align: middle;
+    }
+    table.unreg-table .tid-cell {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 700;
+      color: var(--warn);
+      letter-spacing: 0.02em;
+    }
+    table.unreg-table .copy-btn {
+      margin-left: 0.6rem;
+      font-family: inherit;
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.15rem 0.5rem;
+      cursor: pointer;
+    }
+    table.unreg-table .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+    table.unreg-table .copy-btn.copied { color: var(--ok); border-color: var(--ok); }
+
+    @media (max-width: 720px) {
+      body { padding: 0.75rem; }
+      h1 { font-size: 1.4rem; }
+      table { font-size: 0.92rem; }
+      .timer { font-size: 1.3rem; }
+      .raw { display: none; }
+      thead th:nth-child(8) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>TKS Dashboard<span class="sub">Live Timing</span></h1>
+    <div style="display:flex; align-items:center; gap:0.6rem;">
+      <div id="unregisteredBadge"><span>⚠</span><span class="label">0 未配對</span></div>
+      <div id="status"><span class="dot"></span><span class="label">連線中…</span></div>
+      <button id="resetBtn" type="button">重置賽段</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>排名</th>
+            <th>車號</th>
+            <th>Transponder</th>
+            <th>圈數</th>
+            <th>上圈</th>
+            <th>最佳</th>
+            <th>本圈</th>
+            <th>原始資料</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <details id="unregisteredPanel" open>
+    <summary>⚠ 未配對 Transponder <span id="unregisteredMeta">0 台</span></summary>
+    <table class="unreg-table" id="unregisteredTable" style="display:none;">
+      <thead>
+        <tr>
+          <th>Transponder UID</th>
+          <th>圈數</th>
+          <th>最佳單圈</th>
+          <th>最後出現</th>
+        </tr>
+      </thead>
+      <tbody id="unregisteredRows"></tbody>
+    </table>
+    <div id="unregisteredEmpty">目前沒有未配對的transponder。有新的車手/車號時，若CAR_NUMBER_MAP還沒登記，會出現在這裡，方便直接複製UID去補設定。</div>
+  </details>
+
+  <details id="capturesPanel">
+    <summary>即時封包 <span id="captureMeta">0 筆 · —</span></summary>
+    <ul id="captures"></ul>
+  </details>
+
+  <script>
+    const rows = document.getElementById("rows");
+    const statusEl = document.getElementById("status");
+    const statusLabel = statusEl.querySelector(".label");
+    const capturesEl = document.getElementById("captures");
+    const captureMetaEl = document.getElementById("captureMeta");
+    const unregisteredBadge = document.getElementById("unregisteredBadge");
+    const unregisteredTable = document.getElementById("unregisteredTable");
+    const unregisteredRows = document.getElementById("unregisteredRows");
+    const unregisteredEmpty = document.getElementById("unregisteredEmpty");
+    const unregisteredMetaEl = document.getElementById("unregisteredMeta");
+    const resetBtn = document.getElementById("resetBtn");
+    const state = new Map();
+    const MAX_CAPTURES = 30;
+    let decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
+    let captureCount = 0;
+
+    function fmtLastSeen(iso) {
+      if (!iso) return "—";
+      try {
+        return new Date(iso).toLocaleTimeString();
+      } catch {
+        return "—";
+      }
+    }
+
+    // 未配對 transponder 面板：從 state 篩出 registered === false 的項目，
+    // 依最後出現時間新到舊排序，方便現場對照剛跑過的車。
+    function renderUnregistered() {
+      const unregistered = [...state.values()]
+        .filter((s) => s.registered === false)
+        .sort((a, b) => {
+          const ta = a.last_passing_at ? new Date(a.last_passing_at).getTime() : 0;
+          const tb = b.last_passing_at ? new Date(b.last_passing_at).getTime() : 0;
+          return tb - ta;
+        });
+
+      const count = unregistered.length;
+      unregisteredMetaEl.textContent = `${count} 台`;
+      unregisteredBadge.querySelector(".label").textContent = `${count} 未配對`;
+      unregisteredBadge.classList.toggle("show", count > 0);
+
+      unregisteredTable.style.display = count > 0 ? "" : "none";
+      unregisteredEmpty.style.display = count > 0 ? "none" : "";
+
+      unregisteredRows.innerHTML = "";
+      for (const s of unregistered) {
+        const tr = document.createElement("tr");
+        const tid = s.transponder_id || "—";
+        tr.innerHTML = `
+          <td class="tid-cell">${tid}<button class="copy-btn" type="button" data-tid="${tid}">複製</button></td>
+          <td>${s.lap_count ?? 0}</td>
+          <td>${fmt(s.best_lap_time)}</td>
+          <td>${fmtLastSeen(s.last_passing_at)}</td>`;
+        unregisteredRows.appendChild(tr);
+      }
+    }
+
+    unregisteredRows.addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".copy-btn");
+      if (!btn) return;
+      const tid = btn.dataset.tid;
+      navigator.clipboard?.writeText(tid).then(() => {
+        btn.textContent = "已複製";
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = "複製";
+          btn.classList.remove("copied");
+        }, 1500);
+      }).catch(() => {});
+    });
+
+    function fmt(sec) {
+      if (sec == null || Number.isNaN(sec)) return "—";
+      return sec.toFixed(3) + "s";
+    }
+
+    // ---- rank/sort：與後端 LapTracker._sort_key 邏輯一致 ----
+    // group 0: 已註冊 + 有 best_lap_time -> best_lap_time 由小到大
+    // group 1: 已註冊 + 無 best_lap_time -> car_number（數值優先）
+    // group 2: 未註冊 + 有 best_lap_time -> best_lap_time 由小到大
+    // group 3: 未註冊 + 無 best_lap_time -> transponder_id（數值優先）
+    function sortGroup(s) {
+      const registered = s.registered !== false;
+      const hasBest = s.best_lap_time != null;
+      if (registered && hasBest) return 0;
+      if (registered) return 1;
+      if (hasBest) return 2;
+      return 3;
+    }
+
+    // 與後端 LapTracker._numeric_sort_key 一致：純數字車號/ID 依數值排序
+    // （"11" 排在 "2" 之後），非數字內容 fallback 為字串排序並排在所有數字之後。
+    function numericSortKey(value) {
+      const str = (value || "").toString();
+      if (/^\d+$/.test(str)) return [0, parseInt(str, 10), ""];
+      return [1, 0, str];
+    }
+
+    function compareTuples(ta, tb) {
+      for (let i = 0; i < ta.length; i++) {
+        if (ta[i] < tb[i]) return -1;
+        if (ta[i] > tb[i]) return 1;
+      }
+      return 0;
+    }
+
+    function compareStates(a, b) {
+      const ga = sortGroup(a), gb = sortGroup(b);
+      if (ga !== gb) return ga - gb;
+      if (ga === 0 || ga === 2) {
+        // 都有 best_lap_time，明確 null-safe 比較，避免 NaN
+        const diff = (a.best_lap_time ?? 0) - (b.best_lap_time ?? 0);
+        if (diff !== 0) return diff;
+      }
+      const ka = numericSortKey(ga <= 1 ? a.car_number : a.transponder_id);
+      const kb = numericSortKey(ga <= 1 ? b.car_number : b.transponder_id);
+      return compareTuples(ka, kb);
+    }
+
+    // rowKey：一律用 transponder_id（穩定、唯一，不受 car_number 是否含 "?" 前綴影響），
+    // 避免同一台車在不同訊息路徑（單筆 vs 全量快照）之間因 key 計算不一致而被誤判成新 row 造成閃爍。
+    function rowKey(data) {
+      return data.transponder_id;
+    }
+
+    function updateStatus() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const multi = decoderStatus.total_count > 1;
+      if (decoderStatus.connected) {
+        statusLabel.textContent = multi
+          ? `已連線 · Decoder ${decoderStatus.connected_count}/${decoderStatus.total_count} 運行中`
+          : "已連線 · Decoder 運行中";
+        statusEl.className =
+          multi && decoderStatus.connected_count < decoderStatus.total_count ? "warn" : "ok";
+      } else {
+        statusLabel.textContent = multi
+          ? "已連線 · 全部 Decoder 斷線（計時已暫停）"
+          : "已連線 · Decoder 斷線（計時已暫停）";
+        statusEl.className = "warn";
+      }
+    }
+
+    function timerText(s) {
+      if (s.current_lap_elapsed == null) return "—";
+      if (!s.timer_active) return fmt(s.current_lap_elapsed);
+      const recv = s._recvPerf ?? performance.now();
+      const delta = (performance.now() - recv) / 1000;
+      return fmt(s.current_lap_elapsed + Math.max(delta, 0));
+    }
+
+    function ensureRow(id) {
+      let tr = document.getElementById("row-" + id);
+      if (tr) return tr;
+      tr = document.createElement("tr");
+      tr.id = "row-" + id;
+      tr.innerHTML = `
+        <td class="rank"><span class="rank-badge"></span></td>
+        <td class="car"></td>
+        <td class="tid"></td>
+        <td class="laps"></td>
+        <td class="last"></td>
+        <td class="best"></td>
+        <td class="timer"><span class="timer-value"></span><span class="timer-badge"></span></td>
+        <td class="raw"></td>`;
+      rows.appendChild(tr);
+      return tr;
+    }
+
+    function render() {
+      const activeKeys = new Set(state.keys());
+      for (const tr of [...rows.querySelectorAll("tr")]) {
+        const id = tr.id.slice(4);
+        if (!activeKeys.has(id)) tr.remove();
+      }
+
+      const sorted = [...state.values()].sort(compareStates);
+
+      sorted.forEach((s, idx) => {
+        const id = rowKey(s);
+        const tr = ensureRow(id);
+        const rank = idx + 1;
+
+        tr.querySelector(".rank-badge").textContent = rank;
+        tr.querySelector(".car").textContent = s.car_number || s.transponder_id || "—";
+        tr.querySelector(".tid").textContent = s.transponder_id || "—";
+        tr.querySelector(".laps").textContent = s.lap_count ?? 0;
+        tr.querySelector(".last").textContent = fmt(s.last_lap_time);
+        tr.querySelector(".best").textContent = fmt(s.best_lap_time);
+
+        const timerEl = tr.querySelector(".timer");
+        timerEl.querySelector(".timer-value").textContent = timerText(s);
+        timerEl.classList.toggle("paused", s.timer_active === false);
+
+        tr.querySelector(".raw").textContent = s.raw_payload || "—";
+        tr.classList.toggle("unregistered", s.registered === false);
+
+        const isTopRank = s.best_lap_time != null && rank <= 3;
+        tr.classList.toggle("rank-1", isTopRank && rank === 1);
+        tr.classList.toggle("rank-2", isTopRank && rank === 2);
+        tr.classList.toggle("rank-3", isTopRank && rank === 3);
+
+        // 依排序後順序 append，將既有 row 移到正確位置（DOM 中該順序即排行榜順序）
+        rows.appendChild(tr);
+      });
+
+      renderUnregistered();
+    }
+
+    // 每 50ms 只更新「本圈」數字，做本地內插讓碼表看起來即時跑動，
+    // 不做整個 render()（避免不必要的 DOM 重排/reflow）。
+    function tickTimers() {
+      for (const [id, s] of state) {
+        const tr = document.getElementById("row-" + id);
+        if (!tr) continue;
+        tr.querySelector(".timer-value").textContent = timerText(s);
+      }
+    }
+    setInterval(tickTimers, 50);
+
+    function pushCapture(data) {
+      captureCount++;
+      const li = document.createElement("li");
+      const ts = document.createElement("span");
+      ts.className = "ts";
+      const time = new Date(data.timestamp).toLocaleTimeString();
+      ts.textContent = time;
+      li.appendChild(ts);
+      li.appendChild(document.createTextNode(data.ascii || data.hex || ""));
+      capturesEl.prepend(li);
+      while (capturesEl.children.length > MAX_CAPTURES) {
+        capturesEl.removeChild(capturesEl.lastChild);
+      }
+      captureMetaEl.textContent = `${captureCount} 筆 · 最新 ${time}`;
+    }
+
+    // ---- WebSocket：自動重連（指數退避 1s -> 2s -> 4s -> 上限 10s）----
+    let ws = null;
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      const delay = Math.min(1000 * 2 ** reconnectAttempts, 10000);
+      reconnectAttempts++;
+      statusLabel.textContent = `連線中斷，${(delay / 1000).toFixed(0)}s 後重試…`;
+      statusEl.className = "err";
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectWebSocket();
+      }, delay);
+    }
+
+    function connectWebSocket() {
+      const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${wsProto}//${location.host}/ws/laps`);
+
+      ws.onopen = () => {
+        reconnectAttempts = 0;
+        // 重連後 server 會重送 decoder_status + all_states() 全量快照，
+        // 先清空舊的 state/DOM，避免殘留斷線前的過期資料。
+        state.clear();
+        rows.innerHTML = "";
+        decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
+        statusLabel.textContent = "已連線 · 同步中…";
+        statusEl.className = "warn";
+        updateStatus();
+      };
+
+      ws.onclose = () => {
+        scheduleReconnect();
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+
+      ws.onmessage = (ev) => {
+        const data = JSON.parse(ev.data);
+        if (data.type === "capture") {
+          pushCapture(data);
+          return;
+        }
+        if (data.type === "decoder_status") {
+          decoderStatus = data;
+          updateStatus();
+          return;
+        }
+        if (data.type === "session_reset") {
+          state.clear();
+          rows.innerHTML = "";
+          render();
+          return;
+        }
+        data._recvPerf = performance.now();
+        state.set(rowKey(data), data);
+        render();
+      };
+    }
+
+    resetBtn.addEventListener("click", async () => {
+      if (!confirm("確定要重置本場所有計時資料？此動作無法復原。")) return;
+      resetBtn.disabled = true;
+      try {
+        const res = await fetch("/api/session/reset", { method: "POST" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // 成功後畫面會透過 WS session_reset 訊息清空，這裡不需要另外處理。
+      } catch (err) {
+        alert("重置失敗，請稍後再試。");
+      } finally {
+        resetBtn.disabled = false;
+      }
+    });
+
+    connectWebSocket();
+  </script>
+</body>
+</html>

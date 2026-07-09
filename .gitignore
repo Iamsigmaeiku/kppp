@@ -1,0 +1,7 @@
+.env
+services/decoder_ingest/raw_capture.log
+services/decoder_ingest/influx_fallback.ndjson
+__pycache__/
+*.pyc
+.venv/
+venv/
