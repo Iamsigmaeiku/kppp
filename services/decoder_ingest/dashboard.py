@@ -52,24 +52,8 @@ def set_reset_hook(callback) -> None:
 
 @app.post("/api/session/reset")
 async def reset_session() -> dict:
-    if _lap_tracker is None:
-        raise HTTPException(status_code=503, detail="lap tracker not initialized")
-
-    new_session_id = None
-    if _session_manager is not None and _influx_writer is not None:
-        # 先把目前場次歸檔進 InfluxDB 再清空，任何一次手動 reset 都不會
-        # 遺失資料（見 session_manager.py）。
-        new_session_id = await _session_manager.archive_and_reset(
-            _lap_tracker, _influx_writer, trigger="manual"
-        )
-    else:
-        _lap_tracker.reset_session()
-
-    if _on_reset is not None:
-        _on_reset()
-    reset_at = datetime.now(timezone.utc).isoformat()
-    await broadcast_session_reset(reset_at=reset_at)
-    return {"status": "ok", "reset_at": reset_at, "session_id": new_session_id}
+    # 公開即時面板不提供重置；避免現場觀眾/一般登入使用者誤觸清空賽段。
+    raise HTTPException(status_code=403, detail="session reset disabled for public users")
 
 
 @app.websocket("/ws/laps")

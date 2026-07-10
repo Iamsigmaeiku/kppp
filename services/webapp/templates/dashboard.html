@@ -7,7 +7,6 @@
 <div class="dash-toolbar">
   <div id="unregisteredBadge"><span>⚠</span><span class="label">0 未配對</span></div>
   <div id="status"><span class="dot"></span><span class="label">連線中…</span></div>
-  <button id="resetBtn" class="btn" type="button">重置賽段</button>
 </div>
 
 <div class="panel">
@@ -62,7 +61,6 @@
   const unregisteredRows = document.getElementById("unregisteredRows");
   const unregisteredEmpty = document.getElementById("unregisteredEmpty");
   const unregisteredMetaEl = document.getElementById("unregisteredMeta");
-  const resetBtn = document.getElementById("resetBtn");
   const state = new Map();
   const MAX_CAPTURES = 30;
   let decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
@@ -313,20 +311,6 @@
       render();
     };
   }
-
-  resetBtn.addEventListener("click", async () => {
-    if (!confirm("確定要重置本場所有計時資料？此動作無法復原。")) return;
-    resetBtn.disabled = true;
-    try {
-      const res = await fetch("/api/session/reset", { method: "POST" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // 成功後畫面會透過 WS session_reset 訊息清空，這裡不需要另外處理。
-    } catch (err) {
-      alert("重置失敗，請稍後再試。");
-    } finally {
-      resetBtn.disabled = false;
-    }
-  });
 
   connectWebSocket();
 </script>
