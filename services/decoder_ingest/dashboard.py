@@ -35,6 +35,16 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "dashboard.html")
 
 
+@app.get("/dashboard")
+@app.get("/dashboard/")
+@app.get("/dashboards")
+@app.get("/dashboards/")
+async def dashboard_alias() -> FileResponse:
+    # 外部入口曾把公開網址做成 /dashboards，容易跟 Grafana 預設路由撞名。
+    # 這裡直接回自己的 dashboard，避免使用者因舊連結/錯路徑落到別的服務。
+    return FileResponse(STATIC_DIR / "dashboard.html")
+
+
 @app.post("/api/session/reset")
 async def reset_session() -> dict:
     if _lap_tracker is None:
