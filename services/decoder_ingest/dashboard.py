@@ -14,11 +14,19 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 _lap_tracker = None
 _on_reset = None
+_session_manager = None
+_influx_writer = None
 
 
 def set_lap_tracker(tracker) -> None:
     global _lap_tracker
     _lap_tracker = tracker
+
+
+def set_session_manager(session_manager, influx_writer) -> None:
+    global _session_manager, _influx_writer
+    _session_manager = session_manager
+    _influx_writer = influx_writer
 
 
 def set_reset_hook(callback) -> None:
@@ -49,12 +57,22 @@ async def dashboard_alias() -> FileResponse:
 async def reset_session() -> dict:
     if _lap_tracker is None:
         raise HTTPException(status_code=503, detail="lap tracker not initialized")
-    _lap_tracker.reset_session()
+
+    new_session_id = None
+    if _session_manager is not None and _influx_writer is not None:
+        # 先把目前場次歸檔進 InfluxDB 再清空，任何一次手動 reset 都不會
+        # 遺失資料（見 session_manager.py）。
+        new_session_id = await _session_manager.archive_and_reset(
+            _lap_tracker, _influx_writer, trigger="manual"
+        )
+    else:
+        _lap_tracker.reset_session()
+
     if _on_reset is not None:
         _on_reset()
     reset_at = datetime.now(timezone.utc).isoformat()
     await broadcast_session_reset(reset_at=reset_at)
-    return {"status": "ok", "reset_at": reset_at}
+    return {"status": "ok", "reset_at": reset_at, "session_id": new_session_id}
 
 
 @app.websocket("/ws/laps")

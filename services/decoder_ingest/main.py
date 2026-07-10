@@ -17,8 +17,10 @@ from .dashboard import (
     broadcast_capture,
     broadcast_decoder_status,
     broadcast_lap_update,
+    broadcast_session_reset,
     set_lap_tracker,
     set_reset_hook,
+    set_session_manager,
 )
 from .influx_writer import InfluxWriter, InfluxWriterConfig
 from .lap_tracker import LapTracker
@@ -29,8 +31,10 @@ from .packet_parser import (
     PassingRule,
     UnknownPacket,
     bytes_to_printable_ascii,
+    format_passing_calibration_line,
     format_raw_log_line,
 )
+from .session_manager import SessionManager
 from .tcp_client import ReconnectPolicy, TcpClient
 
 logger = logging.getLogger(__name__)
@@ -135,6 +139,12 @@ async def snapshot_loop(
         await asyncio.to_thread(write_snapshot, lap_tracker, path)
 
 
+def _append_calibration_line(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
 async def handle_feed_result(
     result: FeedResult,
     *,
@@ -144,8 +154,12 @@ async def handle_feed_result(
     dry_run: bool,
     lap_tracker: LapTracker | None = None,
     with_dashboard: bool = False,
+    calibration_path: Path | None = None,
+    session_manager: SessionManager | None = None,
 ) -> None:
     del dry_run
+    session_id = session_manager.current_session_id if session_manager else None
+
     for unknown in result.unknowns:
         await unknown_queue.put(unknown)
         if with_dashboard:
@@ -156,18 +170,33 @@ async def handle_feed_result(
             )
 
     for event in result.events:
+        fields = {**event.fields, "decoder_id": decoder_id}
+        if session_id is not None:
+            fields["session_id"] = session_id
         await writer.enqueue(
             ParsedEvent(
                 timestamp=event.timestamp,
                 event_type=event.event_type,
                 raw=event.raw,
-                fields={**event.fields, "decoder_id": decoder_id},
+                fields=fields,
             )
         )
 
     for passing in result.passings:
+        if calibration_path is not None:
+            await asyncio.to_thread(
+                _append_calibration_line,
+                calibration_path,
+                format_passing_calibration_line(passing),
+            )
+
         if lap_tracker is None:
             continue
+        if session_manager is not None:
+            # 用真實牆鐘時間（而非 passing.received_at）記錄活動時間：
+            # replay 模式餵的是歷史時間戳，閒置安全網關心的是「伺服器現在
+            # 是否還在收到即時資料」，跟被重播的舊時間無關。
+            session_manager.note_activity()
         state = lap_tracker.record_passing(passing)
         if not state["registered"]:
             logger.info(
@@ -183,18 +212,24 @@ async def handle_feed_result(
         # None，只有 to_passing_event() 被使用）；這裡補上，讓每次通過連同
         # 當下算出的圈速結果一起進 Influx，做為長期分析用的持久化紀錄。
         # decoder_id 隨事件帶入（見多 decoder 架構），讓每個 decoder 各自的
-        # 來源在 Influx 裡可分辨。
+        # 來源在 Influx 裡可分辨；session_id 隨事件帶入（見 SessionManager），
+        # 讓同一場次的每一圈可用 session_id 篩選出來重建完整歷史。
+        passing_fields: dict[str, str | int | float | bool] = {
+            "transponder_id": passing.transponder_id,
+            "car_number": state["car_number"],
+            "lap_count": state["lap_count"],
+            "last_lap_time": state["last_lap_time"] or 0.0,
+            "best_lap_time": state["best_lap_time"] or 0.0,
+        }
+        if session_id is not None:
+            passing_fields["session_id"] = session_id
         await writer.enqueue(
             ParsedEvent(
                 timestamp=passing.received_at,
                 event_type="passing",
                 raw=bytes.fromhex(passing.raw_payload),
                 fields={
-                    "transponder_id": passing.transponder_id,
-                    "car_number": state["car_number"],
-                    "lap_count": state["lap_count"],
-                    "last_lap_time": state["last_lap_time"] or 0.0,
-                    "best_lap_time": state["best_lap_time"] or 0.0,
+                    **passing_fields,
                     "decoder_id": decoder_id,
                 },
             )
@@ -205,12 +240,35 @@ async def lap_timer_broadcast_loop(
     lap_tracker: LapTracker,
     *,
     stop_event: asyncio.Event,
+    session_manager: SessionManager | None = None,
+    writer: InfluxWriter | None = None,
+    auto_archive_idle_sec: float | None = None,
 ) -> None:
-    """每秒推送本圈計時；逾時或 decoder 斷線時凍結。"""
+    """每秒推送本圈計時；逾時或 decoder 斷線時凍結。若提供
+    session_manager/writer/auto_archive_idle_sec，閒置超過門檻且目前還有
+    未歸檔的資料時，觸發安全網式自動歸檔+重置（見 session_manager.py
+    模組說明——這不是「新一節開始」的偵測，只是避免忘記按重置）。
+    """
     while not stop_event.is_set():
-        for state in lap_tracker.all_states():
+        states = lap_tracker.all_states()
+        for state in states:
             await broadcast_lap_update(state)
         await broadcast_decoder_status(lap_tracker.decoder_status_message())
+
+        if (
+            session_manager is not None
+            and writer is not None
+            and auto_archive_idle_sec is not None
+            and states
+            and session_manager.idle_seconds() >= auto_archive_idle_sec
+        ):
+            await session_manager.archive_and_reset(
+                lap_tracker, writer, trigger="auto_idle"
+            )
+            await broadcast_session_reset(
+                reset_at=datetime.now(timezone.utc).isoformat()
+            )
+
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=1.0)
             break
@@ -251,6 +309,8 @@ async def replay_file(
     dry_run: bool,
     lap_tracker: LapTracker | None = None,
     with_dashboard: bool = False,
+    calibration_path: Path | None = None,
+    session_manager: SessionManager | None = None,
 ) -> None:
     """解析 raw_capture.log 每行 hex，餵給 parser.feed_frame()。"""
     if not logfile.exists():
@@ -284,6 +344,8 @@ async def replay_file(
             dry_run=dry_run,
             lap_tracker=lap_tracker,
             with_dashboard=with_dashboard,
+            calibration_path=calibration_path,
+            session_manager=session_manager,
         )
 
     logger.info("replay finished: %s", logfile)
@@ -306,13 +368,25 @@ async def _run_single_decoder(
     stop_event: asyncio.Event,
     lap_tracker: LapTracker | None = None,
     with_dashboard: bool = False,
+    tick_byte_offset: int = 1,
+    tick_byte_len: int = 3,
+    calibration_path: Path | None = None,
+    session_manager: SessionManager | None = None,
 ) -> None:
     """管理單一 decoder 的 TCP 連線；每台各自有自己的 PacketParser
     （TCP stream framing 的 buffer 不可跨連線共用），但共用同一個
     lap_tracker/writer/unknown_queue，讓多台 decoder 的資料合併進同一份
     賽事狀態。
     """
-    parser = PacketParser(rules=[PassingRule(transponder_id_len=transponder_id_len)])
+    parser = PacketParser(
+        rules=[
+            PassingRule(
+                transponder_id_len=transponder_id_len,
+                tick_byte_offset=tick_byte_offset,
+                tick_byte_len=tick_byte_len,
+            )
+        ]
+    )
 
     async def on_data(chunk: bytes) -> None:
         received_at = datetime.now(timezone.utc)
@@ -325,6 +399,8 @@ async def _run_single_decoder(
             dry_run=dry_run,
             lap_tracker=lap_tracker,
             with_dashboard=with_dashboard,
+            calibration_path=calibration_path,
+            session_manager=session_manager,
         )
 
     async def on_connect() -> None:
@@ -380,6 +456,7 @@ async def tcp_ingest_loop(
     stop_event: asyncio.Event,
     lap_tracker: LapTracker | None = None,
     with_dashboard: bool = False,
+    session_manager: SessionManager | None = None,
 ) -> None:
     """所有已設定的 decoder 併發運作；每台各自獨立連線/重連，
     共用同一個 lap_tracker，讓同一支 transponder 不管從哪台 decoder
@@ -396,6 +473,10 @@ async def tcp_ingest_loop(
                 stop_event=stop_event,
                 lap_tracker=lap_tracker,
                 with_dashboard=with_dashboard,
+                tick_byte_offset=config.lap.decoder_tick_byte_offset,
+                tick_byte_len=config.lap.decoder_tick_byte_len,
+                calibration_path=config.passing_calibration_path,
+                session_manager=session_manager,
             ),
             name=f"decoder-{endpoint.decoder_id}",
         )
@@ -446,7 +527,11 @@ async def run_service(
     # PacketParser，見 _run_single_decoder。
     parser = PacketParser(
         rules=[
-            PassingRule(transponder_id_len=config.lap.transponder_prefix_len),
+            PassingRule(
+                transponder_id_len=config.lap.transponder_prefix_len,
+                tick_byte_offset=config.lap.decoder_tick_byte_offset,
+                tick_byte_len=config.lap.decoder_tick_byte_len,
+            ),
         ]
     )
     lap_tracker = LapTracker(
@@ -455,11 +540,10 @@ async def run_service(
         max_lap_time_sec=config.lap.max_lap_time_sec,
         car_number_map=config.lap.car_number_map,
         decoder_ids=[endpoint.decoder_id for endpoint in config.decoders],
+        decoder_tick_hz=config.lap.decoder_tick_hz,
     )
     load_snapshot(lap_tracker, config.snapshot_path)
-    if with_dashboard:
-        set_lap_tracker(lap_tracker)
-        set_reset_hook(lambda: write_snapshot(lap_tracker, config.snapshot_path))
+    session_manager = SessionManager.start_new()
     writer = InfluxWriter(
         InfluxWriterConfig(
             url=config.influx.url,
@@ -473,6 +557,10 @@ async def run_service(
         ),
         dry_run=dry_run,
     )
+    if with_dashboard:
+        set_lap_tracker(lap_tracker)
+        set_reset_hook(lambda: write_snapshot(lap_tracker, config.snapshot_path))
+        set_session_manager(session_manager, writer)
 
     stop_event = asyncio.Event()
     install_signal_handlers(asyncio.get_running_loop(), stop_event)
@@ -519,7 +607,13 @@ async def run_service(
         )
         tasks.append(
             asyncio.create_task(
-                lap_timer_broadcast_loop(lap_tracker, stop_event=stop_event),
+                lap_timer_broadcast_loop(
+                    lap_tracker,
+                    stop_event=stop_event,
+                    session_manager=session_manager,
+                    writer=writer,
+                    auto_archive_idle_sec=config.auto_archive_idle_sec,
+                ),
                 name="lap-timer-broadcast",
             )
         )
@@ -535,6 +629,8 @@ async def run_service(
                     dry_run=dry_run,
                     lap_tracker=lap_tracker,
                     with_dashboard=with_dashboard,
+                    calibration_path=config.passing_calibration_path,
+                    session_manager=session_manager,
                 ),
                 name="replay",
             )
@@ -550,6 +646,7 @@ async def run_service(
                     stop_event=stop_event,
                     lap_tracker=lap_tracker,
                     with_dashboard=with_dashboard,
+                    session_manager=session_manager,
                 ),
                 name="tcp-ingest",
             )

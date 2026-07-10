@@ -28,10 +28,56 @@ class UnknownPacket:
 
 
 @dataclass(frozen=True, slots=True)
+class DecodedTail:
+    """passing payload 去掉 transponder id 後剩餘 hex 的解碼結果。
+
+    hit_counter 是第一個 byte（依樣本分析像是每次通過遞增的計數器，
+    見 lap_tracker 對照分析）；tick_raw 是依可設定的 byte_offset/byte_len
+    取出的候選高精度時間戳/tick 值，尚未換算成秒（真正的 tick 頻率需靠
+    診斷校正流程確認，見 DECODER_TICK_HZ）。任何一個欄位都可能是 None，
+    表示剩餘 hex 不夠長、無法取出該欄位。
+    """
+
+    hit_counter: int | None
+    tick_raw: int | None
+
+
+def decode_trailing_hex(
+    trailing_hex: str,
+    *,
+    tick_byte_offset: int,
+    tick_byte_len: int,
+) -> DecodedTail | None:
+    """解碼 transponder id 之後剩餘的 hex payload。不確定/長度不足時回傳
+    None 或部分欄位為 None，絕不拋例外——這段資料的實際格式在校正完成前
+    仍是猜測，任何解碼失敗都不該讓 passing 事件整個處理失敗。
+    """
+    if not trailing_hex:
+        return None
+    try:
+        tail = bytes.fromhex(trailing_hex)
+    except ValueError:
+        return None
+    if not tail:
+        return None
+
+    hit_counter = tail[0]
+    tick_raw: int | None = None
+    end = tick_byte_offset + tick_byte_len
+    if tick_byte_offset >= 0 and len(tail) >= end:
+        tick_raw = int.from_bytes(tail[tick_byte_offset:end], "big")
+
+    return DecodedTail(hit_counter=hit_counter, tick_raw=tick_raw)
+
+
+@dataclass(frozen=True, slots=True)
 class PassingEvent:
     transponder_id: str
     raw_payload: str
     received_at: datetime
+    decoder_tick: int | None = None
+    tick_byte_len: int | None = None
+    hit_counter: int | None = None
 
 
 @dataclass(slots=True)
@@ -77,8 +123,16 @@ class PassingRule(ParserRule):
 
     PASSING_PATTERN = re.compile(rb"\$([0-9A-Fa-f]+)\r\n")
 
-    def __init__(self, *, transponder_id_len: int = TRANSPONDER_ID_HEX_LEN) -> None:
+    def __init__(
+        self,
+        *,
+        transponder_id_len: int = TRANSPONDER_ID_HEX_LEN,
+        tick_byte_offset: int = 1,
+        tick_byte_len: int = 3,
+    ) -> None:
         self._transponder_id_len = transponder_id_len
+        self._tick_byte_offset = tick_byte_offset
+        self._tick_byte_len = tick_byte_len
 
     @property
     def name(self) -> str:
@@ -97,10 +151,19 @@ class PassingRule(ParserRule):
         m = self.PASSING_PATTERN.match(frame)
         assert m is not None
         raw_hex = m.group(1).decode("ascii").upper()
+        trailing_hex = raw_hex[self._transponder_id_len :]
+        tail = decode_trailing_hex(
+            trailing_hex,
+            tick_byte_offset=self._tick_byte_offset,
+            tick_byte_len=self._tick_byte_len,
+        )
         return PassingEvent(
             transponder_id=raw_hex[: self._transponder_id_len],
             raw_payload=raw_hex,
             received_at=received_at,
+            decoder_tick=tail.tick_raw if tail else None,
+            tick_byte_len=self._tick_byte_len if (tail and tail.tick_raw is not None) else None,
+            hit_counter=tail.hit_counter if tail else None,
         )
 
 
@@ -184,3 +247,16 @@ def format_raw_log_line(packet: UnknownPacket) -> str:
     hex_str = packet.raw.hex()
     ascii_str = bytes_to_printable_ascii(packet.raw)
     return f"{ts} | {hex_str} | {ascii_str}"
+
+
+def format_passing_calibration_line(passing: PassingEvent) -> str:
+    """校正用途：不論是否已註冊，逐筆記錄 passing 的到達時間與完整 payload，
+    供離線比對 tick 欄位與碼表/decoder 螢幕時間，找出真正的 tick 編碼。
+    輸出: {iso} | {raw_payload} | tid={id} tick={tick} hit={hit_counter}
+    """
+    ts = passing.received_at.astimezone(timezone.utc).isoformat()
+    return (
+        f"{ts} | {passing.raw_payload} | "
+        f"tid={passing.transponder_id} tick={passing.decoder_tick} "
+        f"hit={passing.hit_counter}"
+    )

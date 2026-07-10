@@ -50,6 +50,9 @@ class LapConfig:
     timer_timeout_sec: float
     max_lap_time_sec: float
     car_number_map: dict[str, str]
+    decoder_tick_hz: float | None
+    decoder_tick_byte_offset: int
+    decoder_tick_byte_len: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +71,8 @@ class AppConfig:
     snapshot_path: Path
     snapshot_interval_sec: float
     log_level: str
+    auto_archive_idle_sec: float
+    passing_calibration_path: Path | None
 
 
 def _require_env(name: str) -> str:
@@ -99,6 +104,26 @@ def _env_int(name: str, default: int) -> int:
 
 def _env_path(name: str, default: str) -> Path:
     raw = os.getenv(name, default).strip()
+    return Path(raw)
+
+
+def _env_optional_float(name: str) -> float | None:
+    """未設定或空字串回傳 None（代表功能關閉），與 _env_float 的「有預設值」
+    語意不同：這裡的 None 本身就是有意義的預設狀態，不是缺值錯誤。
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(f"環境變數 {name} 必須為數字，收到: {raw!r}") from exc
+
+
+def _env_optional_path(name: str) -> Path | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
     return Path(raw)
 
 
@@ -255,6 +280,9 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
         timer_timeout_sec=_env_float("LAP_TIMER_TIMEOUT_SEC", 120.0),
         max_lap_time_sec=_env_float("LAP_MAX_LAP_TIME_SEC", 600.0),
         car_number_map=_env_car_number_map(),
+        decoder_tick_hz=_env_optional_float("DECODER_TICK_HZ"),
+        decoder_tick_byte_offset=_env_int("DECODER_TICK_BYTE_OFFSET", 1),
+        decoder_tick_byte_len=_env_int("DECODER_TICK_BYTE_LEN", 3),
     )
     if lap.transponder_prefix_len <= 0:
         raise ConfigError("TRANSPONDER_PREFIX_LEN 必須 > 0")
@@ -264,6 +292,12 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
         raise ConfigError("LAP_TIMER_TIMEOUT_SEC 必須 > 0")
     if lap.max_lap_time_sec <= lap.noise_threshold_sec:
         raise ConfigError("LAP_MAX_LAP_TIME_SEC 必須大於 LAP_NOISE_THRESHOLD_SEC")
+    if lap.decoder_tick_hz is not None and lap.decoder_tick_hz <= 0:
+        raise ConfigError("DECODER_TICK_HZ 必須 > 0（或留空以停用）")
+    if lap.decoder_tick_byte_offset < 0:
+        raise ConfigError("DECODER_TICK_BYTE_OFFSET 必須 >= 0")
+    if lap.decoder_tick_byte_len <= 0:
+        raise ConfigError("DECODER_TICK_BYTE_LEN 必須 > 0")
 
     dashboard = DashboardConfig(
         host=os.getenv("DASHBOARD_HOST", "0.0.0.0").strip() or "0.0.0.0",
@@ -275,6 +309,10 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
     snapshot_interval_sec = _env_float("SNAPSHOT_INTERVAL_SEC", 10.0)
     if snapshot_interval_sec <= 0:
         raise ConfigError("SNAPSHOT_INTERVAL_SEC 必須 > 0")
+
+    auto_archive_idle_sec = _env_float("AUTO_ARCHIVE_IDLE_SEC", 1800.0)
+    if auto_archive_idle_sec <= 0:
+        raise ConfigError("AUTO_ARCHIVE_IDLE_SEC 必須 > 0")
 
     return AppConfig(
         decoders=decoders,
@@ -291,4 +329,6 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
         ),
         snapshot_interval_sec=snapshot_interval_sec,
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        auto_archive_idle_sec=auto_archive_idle_sec,
+        passing_calibration_path=_env_optional_path("PASSING_CALIBRATION_PATH"),
     )

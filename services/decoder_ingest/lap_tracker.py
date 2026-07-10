@@ -37,6 +37,7 @@ class TransponderState:
     lap_history: list[float] = field(default_factory=list)
     last_raw_payload: str | None = None
     frozen_elapsed: float | None = None
+    last_passing_tick: int | None = None
 
     def clear_timer_freeze(self) -> None:
         self.frozen_elapsed = None
@@ -52,11 +53,16 @@ class LapTracker:
         history_max: int = LAP_HISTORY_MAX,
         car_number_map: dict[str, str] | None = None,
         decoder_ids: Sequence[str] = (),
+        decoder_tick_hz: float | None = None,
     ) -> None:
         self._noise_threshold = noise_threshold_sec
         self._timer_timeout = timer_timeout_sec
         self._max_lap_time = max_lap_time_sec
         self._history_max = history_max
+        # None（預設）代表功能關閉，圈速仍完全依 received_at 計算，行為與
+        # 加入 decoder tick 支援前完全一致。設定後才會改用 decoder 自帶的
+        # tick 欄位計算圈速（見 record_passing）。
+        self._decoder_tick_hz = decoder_tick_hz
         self._car_number_map = {
             tid.upper(): car
             for tid, car in (car_number_map or DEFAULT_CAR_NUMBER_MAP).items()
@@ -234,7 +240,7 @@ class LapTracker:
         state.clear_timer_freeze()
 
         if state.last_passing_at is not None:
-            lap_time = (event.received_at - state.last_passing_at).total_seconds()
+            lap_time = self._compute_lap_time(transponder_id, event, state)
             if lap_time < self._noise_threshold:
                 # 同一次通過的雙觸發雜訊；同時也是多 decoder 涵蓋同一計時點時
                 # 天然的跨 decoder 去重機制（見多 decoder 架構設計）。
@@ -257,6 +263,7 @@ class LapTracker:
                     transponder_id,
                 )
                 state.last_passing_at = event.received_at
+                state.last_passing_tick = event.decoder_tick
                 return self._to_broadcast_dict(
                     transponder_id,
                     state,
@@ -276,12 +283,50 @@ class LapTracker:
             state.lap_count = 0
 
         state.last_passing_at = event.received_at
+        state.last_passing_tick = event.decoder_tick
         return self._to_broadcast_dict(
             transponder_id,
             state,
             raw_payload=event.raw_payload,
             at=event.received_at,
         )
+
+    def _compute_lap_time(
+        self, transponder_id: str, event: PassingEvent, state: TransponderState
+    ) -> float:
+        """優先使用 decoder 自帶的 tick 欄位計算圈速（需
+        DECODER_TICK_HZ 已設定、且這次和上次通過都有解出 tick 值）；
+        否則 fallback 為現行的 received_at 到達時間差。兩者都可用時，
+        算出的圈速若相差超過 0.5 秒會記警告，方便在正式啟用前發現
+        byte offset/長度猜錯的狀況。
+        """
+        fallback_lap_time = (
+            event.received_at - state.last_passing_at
+        ).total_seconds()
+
+        if (
+            self._decoder_tick_hz is None
+            or event.decoder_tick is None
+            or state.last_passing_tick is None
+            or event.tick_byte_len is None
+        ):
+            return fallback_lap_time
+
+        modulus = 1 << (8 * event.tick_byte_len)
+        tick_delta = (event.decoder_tick - state.last_passing_tick) % modulus
+        tick_lap_time = tick_delta / self._decoder_tick_hz
+
+        if abs(tick_lap_time - fallback_lap_time) > 0.5:
+            logger.warning(
+                "lap_time mismatch for %s: tick-based=%.3fs received_at-based=%.3fs "
+                "(using tick-based; check DECODER_TICK_HZ/BYTE_OFFSET/BYTE_LEN if this "
+                "persists)",
+                transponder_id,
+                tick_lap_time,
+                fallback_lap_time,
+            )
+
+        return tick_lap_time
 
     def all_states(self) -> list[dict]:
         ordered_ids = self._sorted_transponder_ids()
@@ -320,6 +365,7 @@ class LapTracker:
                     "best_lap_time": state.best_lap_time,
                     "lap_history": list(state.lap_history),
                     "last_raw_payload": state.last_raw_payload,
+                    "last_passing_tick": state.last_passing_tick,
                 }
                 for tid, state in self._states.items()
             }
@@ -344,6 +390,7 @@ class LapTracker:
                     best_lap_time=raw.get("best_lap_time"),
                     lap_history=list(raw.get("lap_history", [])),
                     last_raw_payload=raw.get("last_raw_payload"),
+                    last_passing_tick=raw.get("last_passing_tick"),
                 )
             except (KeyError, TypeError, ValueError):
                 logger.warning("skipping malformed snapshot entry for %s", tid)

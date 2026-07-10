@@ -126,11 +126,12 @@ class InfluxWriter:
             await self._write_fallback(batch)
 
     def _event_to_point(self, event: ParsedEvent) -> Point:
-        # decoder_id 優先用事件自帶的來源（多 decoder 架構下每個事件各自
-        # 標記是哪台 decoder 產生的），沒有才 fallback 到 writer 層級的
-        # 固定預設值（單 decoder、無 DECODERS 設定時的舊行為）。用 .tag()
-        # 而非 .field()，才能在 Influx 查詢時當篩選/分組依據。
+        # decoder_id/session_id 優先用事件自帶的值（多 decoder 架構、
+        # session 邊界都是逐事件決定的），沒有才 fallback 到 writer 層級的
+        # 固定預設值。用 .tag() 而非 .field()，才能在 Influx 查詢時當
+        # 篩選/分組依據（例如依 session_id 重建單一場次的完整圈速歷史）。
         decoder_id = event.fields.get("decoder_id", self._config.decoder_id)
+        session_id = event.fields.get("session_id")
         point = (
             Point(self._config.measurement)
             .tag("decoder_id", decoder_id)
@@ -139,11 +140,47 @@ class InfluxWriter:
             .field("raw_ascii", bytes_to_printable_ascii(event.raw))
             .time(event.timestamp)
         )
+        if session_id is not None:
+            point = point.tag("session_id", session_id)
         for key, value in event.fields.items():
-            if key == "decoder_id":
+            if key in ("decoder_id", "session_id"):
                 continue
             point = point.field(key, value)
         return point
+
+    async def write_points_now(self, points: list[Point]) -> None:
+        """立即寫入，不進 batch buffer；供 session archive 等一次性、不該
+        等 batch_size/flush_interval 的寫入使用。dry_run 只記 log；失敗時
+        fallback 寫 line-protocol 文字到同一個 fallback 檔案。
+        """
+        if not points:
+            return
+        if self._dry_run:
+            for point in points:
+                self._logger.info(
+                    "[dry-run] point: %s", point.to_line_protocol()
+                )
+            return
+        try:
+            await self._write_batch(points)
+        except Exception:
+            self._logger.exception(
+                "influx write_points_now failed after retries, writing fallback"
+            )
+            await self._write_points_fallback(points)
+
+    async def _write_points_fallback(self, points: list[Point]) -> None:
+        path = self._config.fallback_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [point.to_line_protocol() for point in points]
+
+        def _append() -> None:
+            with path.open("a", encoding="utf-8") as fh:
+                for line in lines:
+                    fh.write(line + "\n")
+
+        await asyncio.to_thread(_append)
+        self._logger.warning("wrote %d point(s) to fallback %s", len(points), path)
 
     async def _write_batch(self, points: list[Point]) -> None:
         """retry max_retries 次。"""
