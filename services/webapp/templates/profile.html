@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}我的資料 · TKS Dashboard{% endblock %}
+{% block heading %}我的資料{% endblock %}
+
+{% block content %}
+<div class="panel" x-data="{ avatarUrl: {{ (avatar_url or '') | tojson }} }">
+  <div style="padding:1.25rem; display:flex; align-items:center; gap:1.25rem; flex-wrap:wrap;">
+    <img :src="avatarUrl || 'data:,'" style="width:4rem;height:4rem;border-radius:50%;object-fit:cover;background:var(--panel-alt);border:2px solid var(--border);" />
+    <div>
+      <div style="font-weight:700; font-size:1.1rem;">{{ user.display_name or user.email }}</div>
+      <div style="color:var(--text-dim); font-size:0.85rem;">{{ user.email }}</div>
+    </div>
+    <div style="margin-left:auto;">
+      <label class="btn" style="cursor:pointer;">
+        上傳頭像
+        <input type="file" accept="image/png,image/jpeg,image/webp" style="display:none;"
+          @change="
+            const file = $event.target.files[0];
+            if (!file) return;
+            const form = new FormData();
+            form.append('file', file);
+            fetch('/api/profile/avatar', { method: 'POST', body: form })
+              .then(r => r.json())
+              .then(d => { if (d.avatar_url) avatarUrl = d.avatar_url; });
+          "
+        />
+      </label>
+      <form action="/api/auth/logout" method="post" style="display:inline;" onsubmit="fetch('/api/auth/logout', {method:'POST'}).then(() => location.href = '/'); return false;">
+        <button type="submit">登出</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header">我的車號綁定</div>
+  {% if not bindings %}
+  <div class="empty-state">尚未綁定任何場次的車號。到即時面板頁面找到自己的 UID 後，用下方表單綁定。</div>
+  {% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>場次</th><th>車號</th><th>綁定時間</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for b in bindings %}
+        {% set key = b.session_id ~ "::" ~ b.transponder_id %}
+        <tr x-data="{
+              report: {{ (reports_by_key.get(key) if reports_by_key.get(key) else none) | tojson }},
+              loading: false,
+              error: null,
+            }">
+          <td class="tid"><a href="/sessions/{{ b.session_id }}">{{ b.session_id }}</a></td>
+          <td class="car">{{ b.car_number or b.transponder_id }}</td>
+          <td>{{ b.bound_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+          <td>
+            <button
+              :disabled="loading"
+              @click="
+                loading = true; error = null;
+                fetch('/api/ai-coach/reports', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({session_id: '{{ b.session_id }}', transponder_id: '{{ b.transponder_id }}'})
+                })
+                  .then(async (r) => {
+                    if (!r.ok) { const d = await r.json(); throw new Error(d.detail || '產生報告失敗'); }
+                    return r.json();
+                  })
+                  .then(d => { report = d; loading = false; })
+                  .catch(e => { error = e.message; loading = false; });
+              "
+              x-text="loading ? '產生中…' : (report ? '重新產生 AI 教練報告' : '產生 AI 教練報告')"
+            ></button>
+          </td>
+        </tr>
+        <tr x-show="report || error">
+          <td colspan="4">
+            <template x-if="error">
+              <div style="color:var(--err);" x-text="error"></div>
+            </template>
+            <template x-if="report">
+              <div>
+                <p x-text="report.summary"></p>
+                <div style="display:flex; gap:2rem; flex-wrap:wrap;">
+                  <div>
+                    <b style="color:var(--ok);">做得不錯</b>
+                    <ul><template x-for="s in report.strengths"><li x-text="s"></li></template></ul>
+                  </div>
+                  <div>
+                    <b style="color:var(--warn);">還可以進步</b>
+                    <ul><template x-for="w in report.weaknesses"><li x-text="w"></li></template></ul>
+                  </div>
+                  <div>
+                    <b style="color:var(--accent);">下次目標</b>
+                    <ul><template x-for="g in report.next_run_goals"><li x-text="g"></li></template></ul>
+                  </div>
+                </div>
+                <template x-if="report.lap_observations && report.lap_observations.length">
+                  <div style="margin-top:0.75rem;">
+                    <b style="color:var(--text-dim);">逐圈觀察</b>
+                    <ul>
+                      <template x-for="obs in report.lap_observations" :key="obs.lap_number">
+                        <li><b x-text="'第 ' + obs.lap_number + ' 圈'"></b>（<span x-text="obs.lap_time.toFixed(3)"></span>s）— <span x-text="obs.note"></span></li>
+                      </template>
+                    </ul>
+                  </div>
+                </template>
+                <p style="color:var(--text-faint); font-size:0.8rem;">信心分數：<span x-text="report.confidence_score"></span>/100</p>
+              </div>
+            </template>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header">綁定新的車號</div>
+  <div style="padding:1rem;" x-data="{ transponderId: '', status: null }">
+    <input type="text" placeholder="輸入 UID（見即時面板的「原始資料」欄）" x-model="transponderId"
+      style="padding:0.5rem 0.75rem; border-radius:8px; border:1px solid var(--border); background:var(--panel-alt); color:var(--text); margin-right:0.5rem;" />
+    <button @click="
+      fetch('/api/bindings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({transponder_id: transponderId})
+      })
+        .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.detail); return d; })
+        .then(() => location.reload())
+        .catch(e => status = e.message);
+    ">綁定</button>
+    <span x-show="status" x-text="status" style="color:var(--err); margin-left:0.5rem;"></span>
+  </div>
+</div>
+{% endblock %}

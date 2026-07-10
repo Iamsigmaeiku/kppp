@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}TKS Dashboard{% endblock %}</title>
+  <link rel="stylesheet" href="/webapp-static/theme.css" />
+  <script defer src="/webapp-static/vendor/alpine.min.js"></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div class="topbar">
+    <h1>{% block heading %}TKS Dashboard{% endblock %}<span class="sub">Live Timing</span></h1>
+    <div id="authStatus" x-data="{ user: null }" x-init="fetch('/api/auth/me').then(r => r.json()).then(d => user = d.user)">
+      <template x-if="user">
+        <span class="btn" style="display:inline-flex;align-items:center;gap:0.5rem;">
+          <img :src="user.avatar_url || 'data:,'" style="width:1.5rem;height:1.5rem;border-radius:50%;object-fit:cover;background:var(--panel-alt);" />
+          <span x-text="user.display_name || user.email"></span>
+        </span>
+      </template>
+      <template x-if="!user">
+        <a class="btn btn-primary" href="/login">登入</a>
+      </template>
+    </div>
+  </div>
+
+  {% include "_nav.html" %}
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

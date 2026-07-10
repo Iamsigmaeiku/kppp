@@ -103,9 +103,13 @@ class ParserRule(ABC):
 
 
 class HeartbeatRule(ParserRule):
-    """匹配 #[0-9]{3,4}[DE]\\r\\n，不產生 ParsedEvent。"""
+    """匹配 decoder keepalive：#[0-9]{3,4}[DE]?\\r\\n，不產生 ParsedEvent。
 
-    PATTERN = re.compile(rb"^#[0-9]{3,4}[DE]\r\n$")
+    現場 decoder 常見兩種格式：`#1440D\\r\\n` 與 `#1440\\r\\n`（無 D/E 尾碼）。
+    後者若未過濾會被當 unknown 灌進即時封包面板，看起來像有資料但其實不是過線。
+    """
+
+    PATTERN = re.compile(rb"^#[0-9]{3,4}(?:[DE])?\r\n$")
 
     @property
     def name(self) -> str:

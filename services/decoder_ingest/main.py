@@ -592,6 +592,13 @@ async def run_service(
     if with_dashboard:
         import uvicorn
 
+        from services.webapp.app import configure_app
+
+        # 掛上 Phase 2+ 新增的 auth/car_bindings/avatars 等路由與
+        # middleware；dashboard_app 和 webapp 的 app 是同一個 FastAPI
+        # instance（見 services/webapp/app.py），這裡只是把它組裝完整。
+        configure_app()
+
         uv_config = uvicorn.Config(
             dashboard_app,
             host=config.dashboard.host,

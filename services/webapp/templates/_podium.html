@@ -1,0 +1,14 @@
+{% macro podium(entries) %}
+{% if entries %}
+<div class="podium">
+  {% for entry in entries[:3] %}
+  <div class="podium-slot place-{{ loop.index }}">
+    <img class="podium-avatar" src="{{ entry.avatar_url or 'data:,' }}" alt="" />
+    <div class="podium-name">{{ entry.name }}</div>
+    <div class="podium-time">{{ entry.time_label }}</div>
+    <div class="podium-block">{{ loop.index }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endmacro %}

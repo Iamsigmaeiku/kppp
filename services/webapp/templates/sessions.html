@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}場次紀錄 · TKS Dashboard{% endblock %}
+{% block heading %}場次紀錄{% endblock %}
+
+{% block content %}
+{% if influx_unavailable %}
+<div class="panel"><div class="empty-state">歷史資料庫目前無法連線，請稍後再試。</div></div>
+{% elif not sessions %}
+<div class="panel"><div class="empty-state">目前還沒有任何已歸檔的場次</div></div>
+{% else %}
+<div class="panel">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>場次</th><th>開始時間</th><th>結束時間</th></tr>
+      </thead>
+      <tbody>
+        {% for s in sessions %}
+        <tr>
+          <td class="tid"><a href="/sessions/{{ s.session_id }}">{{ s.session_id }}</a></td>
+          <td>{{ s.started_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+          <td>{{ s.ended_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

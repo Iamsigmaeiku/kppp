@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kpp-dashboard",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "services.decoder_ingest.main", "--with-dashboard", "--dry-run", "--replay", "services/decoder_ingest/raw_capture.log"],
+      "port": 8010
+    }
+  ]
+}

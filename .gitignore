@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+services/webapp/kpp.sqlite3
+uploads/
+.pytest_cache/

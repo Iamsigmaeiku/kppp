@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}{{ session_id }} · TKS Dashboard{% endblock %}
+{% block heading %}場次 {{ session_id }}{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>排名</th><th>車號</th><th>圈數</th><th>最佳圈速</th><th>末圈</th><th></th></tr>
+      </thead>
+      {% for r in summary %}
+      <tbody x-data="{ open: false, laps: null, loading: false }">
+        <tr class="rank-{{ loop.index }}">
+          <td><span class="rank-badge">{{ loop.index }}</span></td>
+          <td class="car">{{ r.car_number or r.transponder_id }}</td>
+          <td class="laps">{{ r.lap_count }}</td>
+          <td class="best">{{ r.best_lap_time | laptime }}</td>
+          <td class="last">{{ r.last_lap_time | laptime }}</td>
+          <td>
+            <button
+              @click="
+                open = !open;
+                if (open && !laps) {
+                  loading = true;
+                  fetch('/api/sessions/{{ session_id }}/laps/{{ r.transponder_id }}')
+                    .then(res => res.json())
+                    .then(data => { laps = data.laps; loading = false; });
+                }
+              "
+              x-text="open ? '收起' : '展開全部 {{ r.lap_count }} 圈'"
+            ></button>
+          </td>
+        </tr>
+        <tr x-show="open" x-cloak>
+          <td colspan="6">
+            <template x-if="loading"><span>載入中…</span></template>
+            <template x-if="laps && !loading">
+              <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">
+                <template x-for="lap in laps" :key="lap.lap_number">
+                  <span class="btn" style="cursor:default;">
+                    <b x-text="'#' + lap.lap_number"></b>&nbsp;<span x-text="lap.lap_time_label"></span>
+                  </span>
+                </template>
+              </div>
+            </template>
+          </td>
+        </tr>
+      </tbody>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -60,15 +60,27 @@ class InfluxReader:
         self._config = config
         self._measurement = measurement
         self._archive_measurement = archive_measurement
-        self._client = InfluxDBClientAsync(
-            url=config.url, token=config.token, org=config.org
-        )
+        # InfluxDBClientAsync 內部用到的 aiohttp session 要求建構當下有
+        # running event loop，但這個物件本身常常在還沒有 loop 的地方就被
+        # 建出來（例如 app.py 的 configure_app() 是同步函式）。延後到第一次
+        # 真的查詢時才建立，之後同一個 process 內重複使用。
+        self._client: InfluxDBClientAsync | None = None
+
+    async def _get_client(self) -> InfluxDBClientAsync:
+        if self._client is None:
+            self._client = InfluxDBClientAsync(
+                url=self._config.url, token=self._config.token, org=self._config.org
+            )
+        return self._client
 
     async def close(self) -> None:
-        await self._client.close()
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
 
     async def _query(self, flux: str):
-        return await self._client.query_api().query(flux, org=self._config.org)
+        client = await self._get_client()
+        return await client.query_api().query(flux, org=self._config.org)
 
     async def list_sessions(self, *, range_start: str = "-30d") -> list[SessionSummary]:
         """依 session_archive 的第一/最後一筆時間推得每個場次的起訖時間，

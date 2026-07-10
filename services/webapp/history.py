@@ -1,0 +1,142 @@
+"""排行榜、場次瀏覽、單一場次的每一圈展開對照——全部讀 InfluxDB（見
+influx_reader.py），不碰 SQLite（sessions 表只在使用者綁定車號時才會有
+資料，瀏覽歷史圈速不需要使用者登入）。
+
+InfluxDB 連線失敗（例如維護中、網路問題）時這些頁面應該優雅降級成「暫時
+無法讀取歷史資料」，而不是整頁 500——現場人員在 InfluxDB 短暫離線時應該
+還能看首頁即時面板，不該連帶看不了排行榜頁面本身。
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from services.decoder_ingest.influx_reader import InfluxReader
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+def _get_reader(request: Request) -> InfluxReader:
+    return request.app.state.influx_reader
+
+
+@router.get("/leaderboard", response_class=HTMLResponse)
+async def leaderboard_page(request: Request):
+    reader = _get_reader(request)
+    laptime = request.app.state.templates.env.filters["laptime"]
+
+    entries: list[dict] = []
+    session_entries: list[dict] = []
+    current_session_id: str | None = None
+    influx_unavailable = False
+
+    try:
+        alltime = await reader.get_alltime_best(limit=50)
+        entries = [
+            {
+                "name": e.car_number or e.transponder_id,
+                "avatar_url": None,
+                "time_label": laptime(e.best_lap_time),
+                "transponder_id": e.transponder_id,
+                "best_lap_time": e.best_lap_time,
+                "session_id": e.session_id,
+            }
+            for e in alltime
+        ]
+
+        sessions = await reader.list_sessions(range_start="-1d")
+        current_session_id = sessions[0].session_id if sessions else None
+        if current_session_id:
+            summary = await reader.get_session_summary(current_session_id)
+            session_entries = [
+                {
+                    "name": r.car_number or r.transponder_id,
+                    "avatar_url": None,
+                    "time_label": laptime(r.best_lap_time or None),
+                    "transponder_id": r.transponder_id,
+                    "best_lap_time": r.best_lap_time,
+                }
+                for r in summary
+                if r.best_lap_time
+            ]
+    except Exception:
+        logger.exception("leaderboard: failed to read from InfluxDB")
+        influx_unavailable = True
+
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "leaderboard.html",
+        {
+            "alltime_entries": entries,
+            "session_entries": session_entries,
+            "current_session_id": current_session_id,
+            "influx_unavailable": influx_unavailable,
+        },
+    )
+
+
+@router.get("/sessions", response_class=HTMLResponse)
+async def sessions_page(request: Request):
+    reader = _get_reader(request)
+    influx_unavailable = False
+    sessions = []
+    try:
+        sessions = await reader.list_sessions(range_start="-90d")
+    except Exception:
+        logger.exception("sessions: failed to read from InfluxDB")
+        influx_unavailable = True
+
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "sessions.html",
+        {"sessions": sessions, "influx_unavailable": influx_unavailable},
+    )
+
+
+@router.get("/sessions/{session_id}", response_class=HTMLResponse)
+async def session_detail_page(request: Request, session_id: str):
+    reader = _get_reader(request)
+    try:
+        summary = await reader.get_session_summary(session_id)
+    except Exception as exc:
+        logger.exception("session_detail: failed to read from InfluxDB")
+        raise HTTPException(status_code=503, detail="InfluxDB 目前無法連線") from exc
+
+    if not summary:
+        raise HTTPException(status_code=404, detail="session not found or empty")
+
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "session_detail.html",
+        {"session_id": session_id, "summary": summary},
+    )
+
+
+@router.get("/api/sessions/{session_id}/laps/{transponder_id}")
+async def session_lap_history_api(request: Request, session_id: str, transponder_id: str):
+    reader = _get_reader(request)
+    laptime_filter = request.app.state.templates.env.filters["laptime"]
+    try:
+        laps = await reader.get_lap_history(session_id, transponder_id.upper())
+    except Exception as exc:
+        logger.exception("lap_history: failed to read from InfluxDB")
+        raise HTTPException(status_code=503, detail="InfluxDB 目前無法連線") from exc
+
+    return JSONResponse(
+        {
+            "laps": [
+                {
+                    "lap_number": lap.lap_number,
+                    "lap_time": lap.lap_time,
+                    "lap_time_label": laptime_filter(lap.lap_time),
+                    "recorded_at": lap.recorded_at.isoformat(),
+                }
+                for lap in laps
+            ]
+        }
+    )

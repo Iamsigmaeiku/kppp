@@ -213,6 +213,26 @@ def _env_decoders(
     return endpoints
 
 
+def load_influx_config() -> InfluxConfig:
+    """只讀 InfluxDB 相關設定，不需要 DECODER_HOST 等 decoder 設定——供
+    services/webapp（influx_reader 的讀取路徑）取得連線資訊使用，不需要
+    走完整的 load_config()（那是為 decoder ingest 服務設計的）。
+    """
+    return InfluxConfig(
+        url=_require_env("INFLUX_URL"),
+        token=_require_env("INFLUX_TOKEN"),
+        org=_require_env("INFLUX_ORG"),
+        bucket=_require_env("INFLUX_BUCKET"),
+        decoder_id=os.getenv("DECODER_ID", "decoder-01").strip() or "decoder-01",
+        batch_size=_env_int("BATCH_SIZE", 100),
+        flush_interval_sec=_env_float("FLUSH_INTERVAL_SEC", 5.0),
+        fallback_path=_env_path(
+            "FALLBACK_PATH",
+            "services/decoder_ingest/influx_fallback.ndjson",
+        ),
+    )
+
+
 def load_config(*, dry_run: bool = False) -> AppConfig:
     """從環境變數組裝 AppConfig；非 dry-run 時 Influx 欄位必填。"""
     reconnect_initial_sec = _env_float("RECONNECT_INITIAL_SEC", 1.0)
@@ -255,19 +275,7 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
             ),
         )
     else:
-        influx = InfluxConfig(
-            url=_require_env("INFLUX_URL"),
-            token=_require_env("INFLUX_TOKEN"),
-            org=_require_env("INFLUX_ORG"),
-            bucket=_require_env("INFLUX_BUCKET"),
-            decoder_id=os.getenv("DECODER_ID", "decoder-01").strip() or "decoder-01",
-            batch_size=_env_int("BATCH_SIZE", 100),
-            flush_interval_sec=_env_float("FLUSH_INTERVAL_SEC", 5.0),
-            fallback_path=_env_path(
-                "FALLBACK_PATH",
-                "services/decoder_ingest/influx_fallback.ndjson",
-            ),
-        )
+        influx = load_influx_config()
 
     if influx.batch_size <= 0:
         raise ConfigError("BATCH_SIZE 必須 > 0")

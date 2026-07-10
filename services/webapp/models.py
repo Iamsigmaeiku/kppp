@@ -1,0 +1,93 @@
+"""SQLite ORM models：users（Google 登入的會員資料）、sessions（場次，
+與 InfluxDB session_archive 用同一組 session_id 對應）、car_bindings
+（使用者與當節車號的綁定）、ai_coach_reports（AI 教練報告快取，Phase 4）。
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .db import Base
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    google_sub: Mapped[str] = mapped_column(unique=True, index=True)
+    email: Mapped[str] = mapped_column(unique=True)
+    display_name: Mapped[str | None] = mapped_column(default=None)
+    google_picture_url: Mapped[str | None] = mapped_column(default=None)
+    # 本機上傳頭像的相對路徑；為 None 時前端 fallback 用 google_picture_url。
+    avatar_path: Mapped[str | None] = mapped_column(default=None)
+    # 保留給未來 TKS Line 會員 API 串接（見 line_stub.py），目前不使用。
+    line_user_id: Mapped[str | None] = mapped_column(unique=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    car_bindings: Mapped[list["CarBinding"]] = relationship(back_populates="user")
+
+
+class RaceSession(Base):
+    """對應 InfluxDB session_archive 裡的同一個 session_id；SQLite 這邊只
+    存給 UI/綁定用的中繼資料，圈速本身的權威資料仍在 InfluxDB。
+    """
+
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(primary_key=True)  # e.g. "sess-20260710-143200"
+    label: Mapped[str | None] = mapped_column(default=None)
+    started_at: Mapped[datetime] = mapped_column()
+    ended_at: Mapped[datetime | None] = mapped_column(default=None)
+    reset_trigger: Mapped[str] = mapped_column(default="manual")  # 'manual' | 'auto_idle'
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), default=None
+    )
+
+    car_bindings: Mapped[list["CarBinding"]] = relationship(back_populates="session")
+
+
+class CarBinding(Base):
+    """使用者登入後，把自己跟某一節比賽裡的某支 transponder 綁在一起，
+    之後才能在個人頁看到自己那節的圈速/AI 教練報告。
+    """
+
+    __tablename__ = "car_bindings"
+    __table_args__ = (
+        UniqueConstraint("session_id", "transponder_id", name="uq_session_transponder"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
+    transponder_id: Mapped[str] = mapped_column()
+    car_number: Mapped[str | None] = mapped_column(default=None)
+    bound_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="car_bindings")
+    session: Mapped["RaceSession"] = relationship(back_populates="car_bindings")
+
+
+class AiCoachReport(Base):
+    """AI 教練報告快取：同一個 session_id/transponder_id 只需成功呼叫一次
+    ExpTech API，之後重複瀏覽直接讀這裡，不必每次都重新呼叫（見
+    ai_coach.py，符合「賽後分析」而非即時的產品定位）。
+    """
+
+    __tablename__ = "ai_coach_reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    session_id: Mapped[str] = mapped_column()
+    transponder_id: Mapped[str] = mapped_column()
+    model: Mapped[str] = mapped_column()
+    prompt_version: Mapped[str] = mapped_column()
+    response_json: Mapped[str] = mapped_column()  # 已驗證過的 JSON 字串
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)

@@ -23,10 +23,25 @@ def set_lap_tracker(tracker) -> None:
     _lap_tracker = tracker
 
 
+def get_lap_tracker():
+    """供 services/webapp（car_bindings 等）讀取目前的 LapTracker，例如
+    查詢某個 transponder 目前對應的車號。回傳 None 代表 dashboard 尚未
+    啟動（--with-dashboard 未開）。
+    """
+    return _lap_tracker
+
+
 def set_session_manager(session_manager, influx_writer) -> None:
     global _session_manager, _influx_writer
     _session_manager = session_manager
     _influx_writer = influx_writer
+
+
+def get_session_manager():
+    """供 services/webapp（car_bindings 等）讀取目前場次的權威 session_id
+    來源。回傳 None 代表 dashboard 尚未啟動。
+    """
+    return _session_manager
 
 
 def set_reset_hook(callback) -> None:

@@ -108,6 +108,19 @@
     #resetBtn:hover { color: var(--err); border-color: var(--err); }
     #resetBtn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    .navlinks { display: flex; gap: 0.5rem; }
+    .navlinks a {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.4rem 0.9rem;
+      text-decoration: none;
+    }
+    .navlinks a:hover { color: var(--accent); border-color: var(--accent-dim); }
+
     @keyframes pulse-dot {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.35; }
@@ -414,6 +427,11 @@
   <div class="topbar">
     <h1>TKS Dashboard<span class="sub">Live Timing</span></h1>
     <div style="display:flex; align-items:center; gap:0.6rem;">
+      <nav class="navlinks">
+        <a href="/leaderboard">排行榜</a>
+        <a href="/sessions">場次紀錄</a>
+        <a href="/profile">我的資料</a>
+      </nav>
       <div id="unregisteredBadge"><span>⚠</span><span class="label">0 未配對</span></div>
       <div id="status"><span class="dot"></span><span class="label">連線中…</span></div>
       <button id="resetBtn" type="button">重置賽段</button>
@@ -538,47 +556,10 @@
       return sec.toFixed(3) + "s";
     }
 
-    // ---- rank/sort：與後端 LapTracker._sort_key 邏輯一致 ----
-    // group 0: 已註冊 + 有 best_lap_time -> best_lap_time 由小到大
-    // group 1: 已註冊 + 無 best_lap_time -> car_number（數值優先）
-    // group 2: 未註冊 + 有 best_lap_time -> best_lap_time 由小到大
-    // group 3: 未註冊 + 無 best_lap_time -> transponder_id（數值優先）
-    function sortGroup(s) {
-      const registered = s.registered !== false;
-      const hasBest = s.best_lap_time != null;
-      if (registered && hasBest) return 0;
-      if (registered) return 1;
-      if (hasBest) return 2;
-      return 3;
-    }
-
-    // 與後端 LapTracker._numeric_sort_key 一致：純數字車號/ID 依數值排序
-    // （"11" 排在 "2" 之後），非數字內容 fallback 為字串排序並排在所有數字之後。
-    function numericSortKey(value) {
-      const str = (value || "").toString();
-      if (/^\d+$/.test(str)) return [0, parseInt(str, 10), ""];
-      return [1, 0, str];
-    }
-
-    function compareTuples(ta, tb) {
-      for (let i = 0; i < ta.length; i++) {
-        if (ta[i] < tb[i]) return -1;
-        if (ta[i] > tb[i]) return 1;
-      }
-      return 0;
-    }
-
+    // 排序直接信任伺服器算好的 rank 欄位（見 LapTracker._to_broadcast_dict），
+    // 不在前端重算一份排序邏輯——避免兩份邏輯久了互相對不上。
     function compareStates(a, b) {
-      const ga = sortGroup(a), gb = sortGroup(b);
-      if (ga !== gb) return ga - gb;
-      if (ga === 0 || ga === 2) {
-        // 都有 best_lap_time，明確 null-safe 比較，避免 NaN
-        const diff = (a.best_lap_time ?? 0) - (b.best_lap_time ?? 0);
-        if (diff !== 0) return diff;
-      }
-      const ka = numericSortKey(ga <= 1 ? a.car_number : a.transponder_id);
-      const kb = numericSortKey(ga <= 1 ? b.car_number : b.transponder_id);
-      return compareTuples(ka, kb);
+      return (a.rank ?? Infinity) - (b.rank ?? Infinity);
     }
 
     // rowKey：一律用 transponder_id（穩定、唯一，不受 car_number 是否含 "?" 前綴影響），

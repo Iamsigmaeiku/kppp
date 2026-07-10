@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}登入 · TKS Dashboard{% endblock %}
+{% block heading %}登入{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <div style="padding:2rem; text-align:center;">
+    <p style="color:var(--text-dim); margin-bottom:1.5rem;">
+      登入後可以綁定車號、查看自己的歷史圈速與 AI 教練報告。
+    </p>
+    {% if google_enabled %}
+    <a class="btn btn-primary" href="/api/auth/google/login" style="font-size:1rem;padding:0.7rem 1.5rem;">
+      使用 Google 帳號登入
+    </a>
+    {% endif %}
+    {% if dev_bypass %}
+    <div style="margin-top:1rem;">
+      <a class="btn" href="/api/auth/dev-login">開發模式登入（略過 Google）</a>
+    </div>
+    {% endif %}
+    {% if not google_enabled and not dev_bypass %}
+    <p style="color:var(--err);">登入功能尚未設定，請聯絡管理員。</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
