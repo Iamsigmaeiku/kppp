@@ -17,13 +17,14 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 _WHITELIST_PREFIXES = (
     "/login",
     "/api/auth/",
-    "/api/telemetry/ingest",
+    "/api/telemetry/ingest",  # ESP32 Bearer token，不是瀏覽器 session
     "/webapp-static/",
-    "/uploads/avatars/",
     "/docs",
     "/openapi.json",
     "/redoc",
 )
+# 注意：/grafana 不在白名單 — 未登入不能直接看儀表板；
+# 登入後 /telemetry iframe 會帶 session cookie 進 /grafana。
 
 
 def _is_whitelisted(path: str) -> bool:

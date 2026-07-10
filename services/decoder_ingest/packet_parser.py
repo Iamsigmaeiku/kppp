@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 TRANSPONDER_ID_HEX_LEN = 12
+# AmbRC/MyLaps 固定欄位：$[tid 12][ticks 8][強度 4]\r\n
+DECODER_TICK_HEX_LEN = 8
+DECODER_STRENGTH_HEX_LEN = 4
+DECODER_TICK_BYTE_LEN = 4  # 8 hex chars → 32-bit；wrap modulus = 2^32
+TRAILING_HEX_MIN_LEN = DECODER_TICK_HEX_LEN + DECODER_STRENGTH_HEX_LEN
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,42 +36,35 @@ class UnknownPacket:
 class DecodedTail:
     """passing payload 去掉 transponder id 後剩餘 hex 的解碼結果。
 
-    hit_counter 是第一個 byte（依樣本分析像是每次通過遞增的計數器，
-    見 lap_tracker 對照分析）；tick_raw 是依可設定的 byte_offset/byte_len
-    取出的候選高精度時間戳/tick 值，尚未換算成秒（真正的 tick 頻率需靠
-    診斷校正流程確認，見 DECODER_TICK_HZ）。任何一個欄位都可能是 None，
-    表示剩餘 hex 不夠長、無法取出該欄位。
+    固定 ASCII hex 欄位：前 8 碼 = decoder ticks（32-bit），後 4 碼 = 強度/命中。
+    hit_counter 欄位名保留相容，語意為強度值。任一欄位為 None 表示 trailing
+    長度不足或非合法 hex。
     """
 
     hit_counter: int | None
     tick_raw: int | None
 
 
-def decode_trailing_hex(
-    trailing_hex: str,
-    *,
-    tick_byte_offset: int,
-    tick_byte_len: int,
-) -> DecodedTail | None:
-    """解碼 transponder id 之後剩餘的 hex payload。不確定/長度不足時回傳
-    None 或部分欄位為 None，絕不拋例外——這段資料的實際格式在校正完成前
-    仍是猜測，任何解碼失敗都不該讓 passing 事件整個處理失敗。
+def decode_trailing_hex(trailing_hex: str) -> DecodedTail | None:
+    """解碼 transponder id 之後的固定欄位 trailing hex。
+
+    格式：`[Decoder ticks 8碼][強度/命中 4碼]`。長度不足或非法 hex 時回傳
+    None / 部分欄位 None，絕不拋例外——解碼失敗不該讓 passing 事件整筆失敗。
     """
     if not trailing_hex:
         return None
+    if len(trailing_hex) < TRAILING_HEX_MIN_LEN:
+        return DecodedTail(hit_counter=None, tick_raw=None)
     try:
-        tail = bytes.fromhex(trailing_hex)
+        tick_raw = int(trailing_hex[:DECODER_TICK_HEX_LEN], 16)
+        hit_counter = int(
+            trailing_hex[
+                DECODER_TICK_HEX_LEN : DECODER_TICK_HEX_LEN + DECODER_STRENGTH_HEX_LEN
+            ],
+            16,
+        )
     except ValueError:
         return None
-    if not tail:
-        return None
-
-    hit_counter = tail[0]
-    tick_raw: int | None = None
-    end = tick_byte_offset + tick_byte_len
-    if tick_byte_offset >= 0 and len(tail) >= end:
-        tick_raw = int.from_bytes(tail[tick_byte_offset:end], "big")
-
     return DecodedTail(hit_counter=hit_counter, tick_raw=tick_raw)
 
 
@@ -123,7 +121,10 @@ class HeartbeatRule(ParserRule):
 
 
 class PassingRule(ParserRule):
-    """匹配 $[hex]\\r\\n passing event，產生 PassingEvent（不寫 Influx）。"""
+    """匹配 $[hex]\\r\\n passing event，產生 PassingEvent（不寫 Influx）。
+
+    完整封包：`$[tid 12][ticks 8][強度 4]\\r\\n`（共 27 bytes）。
+    """
 
     PASSING_PATTERN = re.compile(rb"\$([0-9A-Fa-f]+)\r\n")
 
@@ -131,12 +132,8 @@ class PassingRule(ParserRule):
         self,
         *,
         transponder_id_len: int = TRANSPONDER_ID_HEX_LEN,
-        tick_byte_offset: int = 1,
-        tick_byte_len: int = 3,
     ) -> None:
         self._transponder_id_len = transponder_id_len
-        self._tick_byte_offset = tick_byte_offset
-        self._tick_byte_len = tick_byte_len
 
     @property
     def name(self) -> str:
@@ -156,17 +153,14 @@ class PassingRule(ParserRule):
         assert m is not None
         raw_hex = m.group(1).decode("ascii").upper()
         trailing_hex = raw_hex[self._transponder_id_len :]
-        tail = decode_trailing_hex(
-            trailing_hex,
-            tick_byte_offset=self._tick_byte_offset,
-            tick_byte_len=self._tick_byte_len,
-        )
+        tail = decode_trailing_hex(trailing_hex)
+        has_tick = tail is not None and tail.tick_raw is not None
         return PassingEvent(
             transponder_id=raw_hex[: self._transponder_id_len],
             raw_payload=raw_hex,
             received_at=received_at,
-            decoder_tick=tail.tick_raw if tail else None,
-            tick_byte_len=self._tick_byte_len if (tail and tail.tick_raw is not None) else None,
+            decoder_tick=tail.tick_raw if has_tick else None,
+            tick_byte_len=DECODER_TICK_BYTE_LEN if has_tick else None,
             hit_counter=tail.hit_counter if tail else None,
         )
 

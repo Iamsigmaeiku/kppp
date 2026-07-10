@@ -24,10 +24,14 @@ router = APIRouter()
 @router.get("/dashboard/", response_class=HTMLResponse)
 @router.get("/dashboards", response_class=HTMLResponse)
 @router.get("/dashboards/", response_class=HTMLResponse)
-async def dashboard_page(request: Request):
+async def dashboard_page(
+    request: Request, user: User | None = Depends(get_current_user)
+):
+    # 雙保險：middleware 已會擋，這裡再強制未登入導向 /login
+    if user is None:
+        return RedirectResponse(url="/login?next=/", status_code=302)
     # 外部入口曾把公開網址做成 /dashboards，容易跟 Grafana 預設路由撞名；
-    # 這幾個別名都導回同一個即時面板，避免使用者因舊連結/錯路徑落到別的
-    # 服務（沿用原本 decoder_ingest/dashboard.py 的行為）。
+    # 這幾個別名都導回同一個即時面板。
     return request.app.state.templates.TemplateResponse(request, "dashboard.html", {})
 
 

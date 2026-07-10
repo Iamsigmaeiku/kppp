@@ -22,7 +22,7 @@ from services.decoder_ingest.config import load_influx_config
 from services.decoder_ingest.dashboard import app as decoder_app, set_session_started_hook
 from services.decoder_ingest.influx_reader import InfluxReader
 
-from . import ai_coach, auth, avatars, car_bindings, history, pages, session_numbering, telemetry
+from . import ai_coach, auth, avatars, car_bindings, grafana_proxy, history, pages, session_numbering, telemetry
 from .auth_gate import RequireLoginMiddleware
 from .config import load_web_config
 from .db import make_engine, make_session_factory
@@ -122,6 +122,7 @@ def configure_app() -> None:
     app.include_router(history.router)
     app.include_router(ai_coach.router)
     app.include_router(telemetry.router)
+    app.include_router(grafana_proxy.router)
     app.include_router(pages.router)
 
     web_config.avatar_upload_dir.mkdir(parents=True, exist_ok=True)

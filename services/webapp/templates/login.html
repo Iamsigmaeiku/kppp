@@ -1,13 +1,21 @@
 {% extends "base.html" %}
 
 {% block title %}登入 · TKS Dashboard{% endblock %}
-{% block heading %}登入{% endblock %}
+{% block body_class %}login-gate{% endblock %}
+
+{# 未登入：不要露出任何站內導覽 #}
+{% block chrome %}
+<div class="topbar">
+  <h1>TKS Dashboard<span class="sub">Live Timing</span></h1>
+</div>
+{% endblock %}
 
 {% block content %}
-<div class="panel">
+<div class="panel" style="max-width:28rem;margin:3rem auto;">
   <div style="padding:2rem; text-align:center;">
+    <h2 style="margin:0 0 0.75rem;font-size:1.35rem;">請先登入</h2>
     <p style="color:var(--text-dim); margin-bottom:1.5rem;">
-      請先登入才能使用即時面板、排行榜、場次紀錄與遙測數據。
+      進入網站前必須登入。登入後才能使用即時面板、排行榜、場次紀錄與遙測數據。
     </p>
     {% if google_enabled %}
     <a class="btn btn-primary" href="/api/auth/google/login?next={{ next | urlencode }}" style="font-size:1rem;padding:0.7rem 1.5rem;">

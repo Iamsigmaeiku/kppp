@@ -361,8 +361,7 @@ class LapTracker:
         if abs(tick_lap_time - fallback_lap_time) > 0.5:
             logger.warning(
                 "lap_time mismatch for %s: tick-based=%.3fs received_at-based=%.3fs "
-                "(using tick-based; check DECODER_TICK_HZ/BYTE_OFFSET/BYTE_LEN if this "
-                "persists)",
+                "(using tick-based; check DECODER_TICK_HZ if this persists)",
                 transponder_id,
                 tick_lap_time,
                 fallback_lap_time,

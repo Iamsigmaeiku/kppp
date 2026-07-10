@@ -4,11 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{% block title %}TKS Dashboard{% endblock %}</title>
-  <link rel="stylesheet" href="/webapp-static/theme.css?v=20260710" />
+  <link rel="stylesheet" href="/webapp-static/theme.css?v=20260710b" />
   <script defer src="/webapp-static/vendor/alpine.min.js"></script>
   {% block head %}{% endblock %}
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
+  {% block chrome %}
   <div class="topbar">
     <h1>{% block heading %}TKS Dashboard{% endblock %}<span class="sub">Live Timing</span></h1>
     <div id="authStatus" x-data="{ user: null }" x-init="fetch('/api/auth/me').then(r => r.json()).then(d => user = d.user)">
@@ -29,7 +30,10 @@
     </div>
   </div>
 
+  {% block nav %}
   {% include "_nav.html" %}
+  {% endblock %}
+  {% endblock %}
 
   <main>
     {% block content %}{% endblock %}

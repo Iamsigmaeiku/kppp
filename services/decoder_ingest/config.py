@@ -43,6 +43,11 @@ class InfluxConfig:
     fallback_path: Path
 
 
+# AmbRC/MyLaps 常見 tick 除數（圈時 = tick_delta / DECODER_TICK_HZ）。
+# 不同世代硬體可能不同；留空 DECODER_TICK_HZ= 可關閉改用 wall-clock。
+DEFAULT_DECODER_TICK_HZ = 256000.0
+
+
 @dataclass(frozen=True, slots=True)
 class LapConfig:
     transponder_prefix_len: int
@@ -51,8 +56,6 @@ class LapConfig:
     max_lap_time_sec: float
     car_number_map: dict[str, str]
     decoder_tick_hz: float | None
-    decoder_tick_byte_offset: int
-    decoder_tick_byte_len: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +116,23 @@ def _env_optional_float(name: str) -> float | None:
     """
     raw = os.getenv(name)
     if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(f"環境變數 {name} 必須為數字，收到: {raw!r}") from exc
+
+
+def _env_decoder_tick_hz(
+    name: str = "DECODER_TICK_HZ",
+    *,
+    default: float = DEFAULT_DECODER_TICK_HZ,
+) -> float | None:
+    """未設定 → 預設 256000；明確空字串 → None（關閉 tick，改用 wall-clock）。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if not raw.strip():
         return None
     try:
         return float(raw.strip())
@@ -288,9 +308,7 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
         timer_timeout_sec=_env_float("LAP_TIMER_TIMEOUT_SEC", 120.0),
         max_lap_time_sec=_env_float("LAP_MAX_LAP_TIME_SEC", 600.0),
         car_number_map=_env_car_number_map(),
-        decoder_tick_hz=_env_optional_float("DECODER_TICK_HZ"),
-        decoder_tick_byte_offset=_env_int("DECODER_TICK_BYTE_OFFSET", 1),
-        decoder_tick_byte_len=_env_int("DECODER_TICK_BYTE_LEN", 3),
+        decoder_tick_hz=_env_decoder_tick_hz(),
     )
     if lap.transponder_prefix_len <= 0:
         raise ConfigError("TRANSPONDER_PREFIX_LEN 必須 > 0")
@@ -302,10 +320,6 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
         raise ConfigError("LAP_MAX_LAP_TIME_SEC 必須大於 LAP_NOISE_THRESHOLD_SEC")
     if lap.decoder_tick_hz is not None and lap.decoder_tick_hz <= 0:
         raise ConfigError("DECODER_TICK_HZ 必須 > 0（或留空以停用）")
-    if lap.decoder_tick_byte_offset < 0:
-        raise ConfigError("DECODER_TICK_BYTE_OFFSET 必須 >= 0")
-    if lap.decoder_tick_byte_len <= 0:
-        raise ConfigError("DECODER_TICK_BYTE_LEN 必須 > 0")
 
     dashboard = DashboardConfig(
         host=os.getenv("DASHBOARD_HOST", "0.0.0.0").strip() or "0.0.0.0",

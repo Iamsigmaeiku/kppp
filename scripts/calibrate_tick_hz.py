@@ -1,4 +1,8 @@
-"""從 PASSING_CALIBRATION_PATH 產生的校正 log，反推 DECODER_TICK_HZ。
+"""用 PASSING_CALIBRATION_PATH 校正 log，驗證／覆寫 DECODER_TICK_HZ。
+
+預設 AmbRC/MyLaps 除數是 256000（圈時 = tick_delta / 256000）。本工具用來
+對照官方 Lap Tm，確認現場硬體世代是否用同一個 divisor；若中位數明顯偏離
+256000，再把結果貼進 .env 覆寫。
 
 用法：
     1. 在 .env 設定 PASSING_CALIBRATION_PATH（例如
@@ -13,9 +17,8 @@
            --tid 140211241C6D \
            --reference 51.805,49.769,49.804,49.633,49.794,49.162,49.339,53.104,49.286,53.248,49.514
 
-    4. 把印出來的 DECODER_TICK_HZ 值貼進 .env，重啟服務即可生效
-       （未設定前 lap_tracker 會自動 fallback 回目前的時間戳計算方式，
-       不會因為半套設定而壞掉）。
+    4. 若中位數接近 256000，可維持預設；否則把印出來的 DECODER_TICK_HZ
+       貼進 .env 覆寫。留空 DECODER_TICK_HZ= 會關閉 tick、改用 wall-clock。
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ LINE_PATTERN = re.compile(
 
 # 常見的 tick 頻率，估計值若落在其中一個附近 1% 內就順便提示，方便肉眼
 # 確認校正結果合理（不是必要條件，估計值本身才是要填進 .env 的數字）。
-COMMON_HZ_CANDIDATES = [100.0, 1000.0, 8000.0, 10000.0, 32768.0]
+COMMON_HZ_CANDIDATES = [100.0, 1000.0, 8000.0, 10000.0, 32768.0, 256000.0]
 
 
 @dataclass(slots=True)
@@ -114,8 +117,8 @@ def main() -> int:
     parser.add_argument(
         "--tick-byte-len",
         type=int,
-        default=3,
-        help="對應 DECODER_TICK_BYTE_LEN（預設 3，即 24-bit tick 計數器）",
+        default=4,
+        help="tick 計數器位元組長度（預設 4，即 32-bit / 8 hex 碼）",
     )
     parser.add_argument(
         "--min-gap-sec",
@@ -179,8 +182,8 @@ def main() -> int:
         print(f"標準差: {statistics.stdev(estimates):.3f}")
     if outliers:
         print(
-            "警告：以下圈的估計值跟中位數相差超過 2%，可能是 tick byte "
-            "offset/長度設錯、或該圈實際發生了雜訊誤判："
+            "警告：以下圈的估計值跟中位數相差超過 2%，可能是雜訊誤判、"
+            "或官方 Lap Tm 對應順序有誤："
         )
         for lap_no, e in outliers:
             print(f"  第 {lap_no} 圈: {e:.3f} Hz")
@@ -190,7 +193,7 @@ def main() -> int:
         print(f"提示：估計值接近常見頻率 {common:.0f} Hz，可考慮直接使用整數值。")
 
     print()
-    print(f"把下面這行貼進 .env：")
+    print(f"把下面這行貼進 .env（若與預設 256000 不同才需要覆寫）：")
     print(f"DECODER_TICK_HZ={median:.3f}")
 
     return 0

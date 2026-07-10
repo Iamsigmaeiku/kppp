@@ -9,6 +9,28 @@ def test_unauthenticated_html_redirects_to_login(webapp_client):
     assert r.status_code == 302
     assert r.headers["location"].startswith("/login")
 
+    r2 = webapp_client.get("/leaderboard", follow_redirects=False)
+    assert r2.status_code == 302
+    assert "/login" in r2.headers["location"]
+
+    r3 = webapp_client.get("/telemetry", follow_redirects=False)
+    assert r3.status_code == 302
+    assert "/login" in r3.headers["location"]
+
+    r4 = webapp_client.get("/grafana/d/kart-telemetry/", follow_redirects=False)
+    assert r4.status_code == 302
+    assert "/login" in r4.headers["location"]
+
+
+def test_login_page_has_no_site_nav(webapp_client):
+    r = webapp_client.get("/login")
+    assert r.status_code == 200
+    body = r.text
+    assert "請先登入" in body
+    assert 'href="/leaderboard"' not in body
+    assert 'href="/telemetry"' not in body
+    assert "使用 Google" in body or "開發模式登入" in body
+
 
 def test_telemetry_ingest_rejects_bad_token(webapp_client):
     r = webapp_client.post(

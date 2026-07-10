@@ -393,8 +393,6 @@ async def _run_single_decoder(
     stop_event: asyncio.Event,
     lap_tracker: LapTracker | None = None,
     with_dashboard: bool = False,
-    tick_byte_offset: int = 1,
-    tick_byte_len: int = 3,
     calibration_path: Path | None = None,
     session_manager: SessionManager | None = None,
 ) -> None:
@@ -404,13 +402,7 @@ async def _run_single_decoder(
     賽事狀態。
     """
     parser = PacketParser(
-        rules=[
-            PassingRule(
-                transponder_id_len=transponder_id_len,
-                tick_byte_offset=tick_byte_offset,
-                tick_byte_len=tick_byte_len,
-            )
-        ]
+        rules=[PassingRule(transponder_id_len=transponder_id_len)]
     )
 
     async def on_data(chunk: bytes) -> None:
@@ -498,8 +490,6 @@ async def tcp_ingest_loop(
                 stop_event=stop_event,
                 lap_tracker=lap_tracker,
                 with_dashboard=with_dashboard,
-                tick_byte_offset=config.lap.decoder_tick_byte_offset,
-                tick_byte_len=config.lap.decoder_tick_byte_len,
                 calibration_path=config.passing_calibration_path,
                 session_manager=session_manager,
             ),
@@ -552,11 +542,7 @@ async def run_service(
     # PacketParser，見 _run_single_decoder。
     parser = PacketParser(
         rules=[
-            PassingRule(
-                transponder_id_len=config.lap.transponder_prefix_len,
-                tick_byte_offset=config.lap.decoder_tick_byte_offset,
-                tick_byte_len=config.lap.decoder_tick_byte_len,
-            ),
+            PassingRule(transponder_id_len=config.lap.transponder_prefix_len),
         ]
     )
     lap_tracker = LapTracker(

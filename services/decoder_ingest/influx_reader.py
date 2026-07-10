@@ -188,6 +188,9 @@ class InfluxReader:
                 lap_time = row.values.get("last_lap_time")
                 if lap_time is None:
                     continue
+                # 第一次過線寫 last_lap_time=0.0，不算真實圈。
+                if float(lap_time) <= 0.0:
+                    continue
                 records.append(
                     LapRecord(
                         lap_number=len(records) + 1,
