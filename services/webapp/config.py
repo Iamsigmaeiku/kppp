@@ -45,6 +45,8 @@ class WebAppConfig:
     google: GoogleOAuthConfig | None
     ai_coach: AiCoachConfig | None
     display_timezone: str
+    telemetry_ingest_token: str
+    grafana_embed_url: str
 
 
 def _env(name: str, default: str = "") -> str:
@@ -99,4 +101,10 @@ def load_web_config() -> WebAppConfig:
         google=google,
         ai_coach=ai_coach,
         display_timezone=_env("DISPLAY_TIMEZONE", "Asia/Taipei"),
+        telemetry_ingest_token=_env("TELEMETRY_INGEST_TOKEN"),
+        grafana_embed_url=_env(
+            "GRAFANA_EMBED_URL",
+            "http://localhost:3000/grafana/d/kart-telemetry/karting"
+            "?orgId=1&kiosk&theme=dark&refresh=2s",
+        ),
     )

@@ -21,6 +21,12 @@ def _webapp_test_env(tmp_path_factory):
     os.environ["SQLITE_PATH"] = str(db_path)
     os.environ["AUTH_DEV_BYPASS"] = "true"
     os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
+    os.environ.setdefault("INFLUX_URL", "http://localhost:8086")
+    os.environ.setdefault("INFLUX_TOKEN", "kpp-dev-influx-token-change-me")
+    os.environ.setdefault("INFLUX_ORG", "kpp")
+    os.environ.setdefault("INFLUX_BUCKET", "decoder")
+    os.environ.setdefault("TELEMETRY_INGEST_TOKEN", "test-telemetry-token")
+    os.environ.setdefault("GRAFANA_EMBED_URL", "http://localhost:3000/grafana/d/kart-telemetry/karting?orgId=1&kiosk&theme=dark")
     # 測試環境不應該真的打 Google/ExpTech，清掉這些讓 load_web_config()
     # 把 google/ai_coach 設為 None（dev bypass 讓登入照樣可測）。
     for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "AI_API_KEY"):

@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    uid: influxdb-kpp
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    jsonData:
+      version: Flux
+      organization: kpp
+      defaultBucket: decoder
+      tlsSkipVerify: true
+    secureJsonData:
+      token: kpp-dev-influx-token-change-me

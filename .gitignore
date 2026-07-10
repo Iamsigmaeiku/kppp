@@ -8,3 +8,6 @@ venv/
 services/webapp/kpp.sqlite3
 uploads/
 .pytest_cache/
+ESP32/include/secrets.h
+ESP32/.pio/
+ESP32/.vscode/

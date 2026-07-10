@@ -2,5 +2,6 @@
   <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">即時面板</a>
   <a href="/leaderboard" class="{{ 'active' if request.url.path == '/leaderboard' else '' }}">排行榜</a>
   <a href="/sessions" class="{{ 'active' if request.url.path.startswith('/sessions') else '' }}">場次紀錄</a>
+  <a href="/telemetry" class="{{ 'active' if request.url.path.startswith('/telemetry') else '' }}">遙測數據</a>
   <a href="/profile" class="{{ 'active' if request.url.path == '/profile' else '' }}">我的資料</a>
 </nav>

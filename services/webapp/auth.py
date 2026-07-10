@@ -84,6 +84,9 @@ async def google_login(request: Request):
     web_config = request.app.state.web_config
     if web_config.google is None:
         raise HTTPException(status_code=503, detail="Google OAuth not configured")
+    nxt = request.query_params.get("next")
+    if nxt and nxt.startswith("/") and not nxt.startswith("//"):
+        request.session["post_login_next"] = nxt
     oauth: OAuth = request.app.state.oauth
     return await oauth.google.authorize_redirect(
         request, web_config.google.redirect_uri
@@ -107,7 +110,10 @@ async def google_callback(request: Request):
         user = await _upsert_user_from_userinfo(session, userinfo)
 
     request.session["user_id"] = user.id
-    return RedirectResponse(url="/profile")
+    nxt = request.session.pop("post_login_next", None) or "/profile"
+    if not isinstance(nxt, str) or not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/profile"
+    return RedirectResponse(url=nxt)
 
 
 @router.get("/dev-login")
@@ -129,7 +135,10 @@ async def dev_login(request: Request):
         )
 
     request.session["user_id"] = user.id
-    return RedirectResponse(url="/profile")
+    nxt = request.query_params.get("next") or request.session.pop("post_login_next", None) or "/profile"
+    if not isinstance(nxt, str) or not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/profile"
+    return RedirectResponse(url=nxt)
 
 
 @router.post("/logout")

@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}遙測數據 · TKS Dashboard{% endblock %}
+{% block heading %}遙測數據{% endblock %}
+
+{% block head %}
+<style>
+  .telemetry-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1.25rem;
+    align-items: center;
+    margin-bottom: 0.85rem;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+  }
+  .telemetry-status .dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 0.35rem;
+    background: var(--text-faint);
+  }
+  .telemetry-status .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(52, 211, 153, 0.45); }
+  .telemetry-status .dot.warn { background: var(--warn); }
+  .telemetry-frame-wrap {
+    position: relative;
+    width: 100%;
+    min-height: 72vh;
+    border-radius: var(--radius);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    box-shadow: var(--shadow);
+  }
+  .telemetry-frame-wrap iframe {
+    display: block;
+    width: 100%;
+    height: 72vh;
+    border: 0;
+    background: #0b0f18;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="panel" style="padding:1rem 1.1rem 1.15rem;">
+  <div class="panel-header" style="margin-bottom:0.75rem;">卡丁車 IMU / 環境感測（ICM-42688 + DHT11）</div>
+  <div class="telemetry-status" id="telemetryStatus"
+       x-data="telemetryStatus()"
+       x-init="poll()">
+    <span>
+      <span class="dot" :class="online ? 'ok' : 'warn'"></span>
+      <span x-text="online ? 'ESP32 有資料流入' : '等待 ESP32 資料…'"></span>
+    </span>
+    <span x-show="last" x-cloak>
+      裝置 <code x-text="last?.device_id || '—'"></code>
+      · 更新 <span x-text="last?.received_at || '—'"></span>
+    </span>
+    <span x-show="last?.sample" x-cloak>
+      |a|=<span x-text="fmt(last?.sample?.accel_mag)"></span>g
+      · DHT <span x-text="fmt(last?.sample?.dht_temp_c)"></span>°C /
+      <span x-text="fmt(last?.sample?.dht_humidity)"></span>%RH
+    </span>
+  </div>
+  <div class="telemetry-frame-wrap">
+    {% if grafana_embed_url %}
+    <iframe
+      title="Grafana 遙測儀表板"
+      src="{{ grafana_embed_url }}"
+      referrerpolicy="no-referrer-when-downgrade"
+      allowfullscreen
+    ></iframe>
+    {% else %}
+    <div class="empty-state">尚未設定 GRAFANA_EMBED_URL</div>
+    {% endif %}
+  </div>
+  <p style="margin:0.85rem 0 0; color:var(--text-faint); font-size:0.8rem;">
+    儀表板由 Grafana + InfluxDB 提供；請先 <code>docker compose up -d</code>，
+    並讓 ESP32 POST 到 <code>/api/telemetry/ingest</code>。
+  </p>
+</div>
+<script>
+function telemetryStatus() {
+  return {
+    last: null,
+    online: false,
+    fmt(v) {
+      if (v === null || v === undefined || Number.isNaN(v)) return '—';
+      return Number(v).toFixed(2);
+    },
+    async poll() {
+      const tick = async () => {
+        try {
+          const r = await fetch('/api/telemetry/status');
+          if (!r.ok) return;
+          const d = await r.json();
+          this.last = d.last;
+          if (d.last?.received_at) {
+            const age = Date.now() - Date.parse(d.last.received_at);
+            this.online = Number.isFinite(age) && age < 15000;
+          } else {
+            this.online = false;
+          }
+        } catch (_) { /* ignore */ }
+      };
+      await tick();
+      setInterval(tick, 3000);
+    }
+  };
+}
+</script>
+{% endblock %}

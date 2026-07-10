@@ -33,8 +33,14 @@ async def dashboard_page(request: Request):
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
+    nxt = request.query_params.get("next") or "/"
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
     if user is not None:
-        return RedirectResponse(url="/profile")
+        return RedirectResponse(url=nxt)
+
+    # OAuth callback 回來後用 session 帶 next
+    request.session["post_login_next"] = nxt
 
     web_config = request.app.state.web_config
     return request.app.state.templates.TemplateResponse(
@@ -43,6 +49,22 @@ async def login_page(request: Request, user: User | None = Depends(get_current_u
         {
             "google_enabled": web_config.google is not None,
             "dev_bypass": web_config.auth_dev_bypass,
+            "next": nxt,
+        },
+    )
+
+
+@router.get("/telemetry", response_class=HTMLResponse)
+@router.get("/telemetry/", response_class=HTMLResponse)
+async def telemetry_page(request: Request):
+    web_config = request.app.state.web_config
+    last = getattr(request.app.state, "telemetry_last", None)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "telemetry.html",
+        {
+            "grafana_embed_url": web_config.grafana_embed_url,
+            "telemetry_last": last,
         },
     )
 

@@ -4,6 +4,24 @@
 from __future__ import annotations
 
 
+def test_unauthenticated_html_redirects_to_login(webapp_client):
+    r = webapp_client.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/login")
+
+
+def test_telemetry_ingest_rejects_bad_token(webapp_client):
+    r = webapp_client.post(
+        "/api/telemetry/ingest",
+        headers={"Authorization": "Bearer wrong"},
+        json={
+            "device_id": "esp32-test",
+            "samples": [{"ax": 0.1, "ay": 0.0, "az": 1.0}],
+        },
+    )
+    assert r.status_code == 401
+
+
 def test_me_returns_none_when_not_logged_in(webapp_client):
     r = webapp_client.get("/api/auth/me")
     assert r.status_code == 200
