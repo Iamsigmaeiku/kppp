@@ -6,19 +6,27 @@ session_id 的權威來源是 decoder_ingest 的 SessionManager（同一個 proc
 sessions 表只在第一次被綁定時才補建對應列（見 _ensure_session_row），
 decoder_ingest 本身不需要知道 SQLite 的存在，維持它只依賴 InfluxDB 的既有
 設計（見 services/webapp/app.py 的套件職責分工說明）。
+
+使用者輸入的 session_number（今天第幾節，見 session_numbering.py）只是
+方便輸入用的短標籤，實際綁定仍然存 session_id（不會重複使用的
+sess-YYYYMMDD-HHMMSS）——numbering 只負責把 #N 解析回對應的 session_id，
+不會改變 CarBinding 本身的存法。留空 session_number 就沿用原本行為，
+綁到目前正在進行的場次。
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.decoder_ingest.dashboard import get_lap_tracker, get_session_manager
 
+from . import session_numbering
 from .deps import get_db, require_user
 from .models import CarBinding, RaceSession, User
 
@@ -27,6 +35,7 @@ router = APIRouter(prefix="/api/bindings")
 
 class BindRequest(BaseModel):
     car_number: str
+    session_number: int | None = None
 
 
 def _current_session_id() -> str:
@@ -34,6 +43,24 @@ def _current_session_id() -> str:
     if session_manager is None:
         raise HTTPException(status_code=503, detail="lap tracker not initialized")
     return session_manager.current_session_id
+
+
+async def _resolve_session_id(
+    db: AsyncSession, request: Request, session_number: int | None
+) -> str:
+    if session_number is None:
+        return _current_session_id()
+
+    web_config = request.app.state.web_config
+    today = datetime.now(ZoneInfo(web_config.display_timezone)).date()
+    session_id = await session_numbering.resolve_session_id(
+        db, session_date=today, session_number=session_number
+    )
+    if session_id is None:
+        raise HTTPException(
+            status_code=404, detail=f"找不到今天第 {session_number} 節場次，請確認場次編號"
+        )
+    return session_id
 
 
 async def _ensure_session_row(db: AsyncSession, session_id: str) -> None:
@@ -60,6 +87,7 @@ def _transponder_id_for_car(car_number: str) -> str | None:
 @router.post("")
 async def bind_car(
     body: BindRequest,
+    request: Request,
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -67,7 +95,7 @@ async def bind_car(
     if not car_number:
         raise HTTPException(status_code=400, detail="車號不可為空")
 
-    session_id = _current_session_id()
+    session_id = await _resolve_session_id(db, request, body.session_number)
 
     # 使用者只認得車號，實際綁定仍以 transponder_id 為準（同一顆晶片才是
     # 真正的計時識別碼）；車號不存在於目前的 CAR_NUMBER_MAP 代表現場還沒

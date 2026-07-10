@@ -73,6 +73,22 @@ async def test_archive_and_reset_skips_write_when_no_states():
     assert writer.states_at_write is None
 
 
+async def test_archive_and_reset_finalizes_in_progress_last_lap():
+    tracker = _make_tracker_with_data()
+    tracker.set_decoder_connected("dec-1", True)
+    writer = _RecordingWriter(tracker)
+    manager = SessionManager.start_new(at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    # _make_tracker_with_data() 的最後一次過線是 t0+45s；場次在 t0+45s+30s
+    # 才真正結束，這 30 秒的「本圈」應該被算成最後一圈才對，而不是憑空消失。
+    reset_at = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=45.0 + 30.0)
+    await manager.archive_and_reset(tracker, writer, trigger="manual", at=reset_at)
+
+    archived_state = writer.states_at_write[0]
+    assert archived_state["lap_count"] == 2
+    assert archived_state["last_lap_time"] == pytest.approx(30.0, abs=1e-6)
+
+
 def test_idle_seconds():
     manager = SessionManager.start_new(at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc))
     later = datetime(2026, 1, 1, 0, 5, 0, tzinfo=timezone.utc)

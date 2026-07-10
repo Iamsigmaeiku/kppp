@@ -22,6 +22,7 @@
           <th>最佳</th>
           <th>本圈</th>
           <th>原始資料</th>
+          <th>每圈</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -65,6 +66,10 @@
   const MAX_CAPTURES = 30;
   let decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
   let captureCount = 0;
+  // 目前的 session_id：由伺服器在連線時、以及每次開新場次時廣播
+  // （見 dashboard.py 的 session_info 訊息），用來查詢「每一圈的圈時」
+  // 展開明細（GET /api/sessions/{session_id}/laps/{transponder_id}）。
+  let currentSessionId = null;
 
   function fmtLastSeen(iso) {
     if (!iso) return "—";
@@ -168,6 +173,7 @@
     if (tr) return tr;
     tr = document.createElement("tr");
     tr.id = "row-" + id;
+    tr.dataset.tid = id;
     tr.innerHTML = `
       <td class="rank"><span class="rank-badge"></span></td>
       <td class="car"></td>
@@ -176,16 +182,33 @@
       <td class="last"></td>
       <td class="best"></td>
       <td class="timer"><span class="timer-value"></span><span class="timer-badge"></span></td>
-      <td class="raw"></td>`;
+      <td class="raw"></td>
+      <td class="expand"><button class="expand-btn" type="button" data-tid="${id}">展開</button></td>`;
     rows.appendChild(tr);
+
+    const detail = document.createElement("tr");
+    detail.id = "detail-" + id;
+    detail.className = "detail-row";
+    detail.style.display = "none";
+    detail.innerHTML = `
+      <td colspan="9">
+        <div class="laps-detail">
+          <span class="laps-loading" style="display:none;">載入中…</span>
+          <span class="laps-empty" style="display:none;">還沒有已歸檔的圈速資料。</span>
+          <div class="laps-chips"></div>
+          <div class="laps-note" style="display:none;">最新 1-2 圈可能還在批次寫入中，請稍後按「重新整理」再試。</div>
+          <button class="refresh-btn" type="button" data-tid="${id}">重新整理</button>
+        </div>
+      </td>`;
+    rows.appendChild(detail);
     return tr;
   }
 
   function render() {
     const activeKeys = new Set(state.keys());
-    for (const tr of [...rows.querySelectorAll("tr")]) {
-      const id = tr.id.slice(4);
-      if (!activeKeys.has(id)) tr.remove();
+    for (const tr of [...rows.querySelectorAll("tr.detail-row, tr[id^='row-']")]) {
+      const id = tr.dataset.tid;
+      if (id && !activeKeys.has(id)) tr.remove();
     }
 
     const sorted = [...state.values()].sort(compareStates);
@@ -214,12 +237,105 @@
       tr.classList.toggle("rank-2", isTopRank && rank === 2);
       tr.classList.toggle("rank-3", isTopRank && rank === 3);
 
-      // 依排序後順序 append，將既有 row 移到正確位置（DOM 中該順序即排行榜順序）
+      // 依排序後順序 append，將既有 row（連同它的展開明細 row）移到正確
+      // 位置（DOM 中該順序即排行榜順序），維持兩者相鄰。
       rows.appendChild(tr);
+      const detail = document.getElementById("detail-" + id);
+      if (detail) rows.appendChild(detail);
     });
 
     renderUnregistered();
   }
+
+  // 每一圈的圈時展開明細：點「展開」時才 fetch 一次並快取，之後只有
+  // 手動按「重新整理」才會重新查——避免展開明細被每秒一次的即時廣播
+  // 反覆打 InfluxDB。
+  const lapsCache = new Map(); // transponder_id -> laps[]
+
+  async function loadLaps(tid, { force = false } = {}) {
+    const detail = document.getElementById("detail-" + tid);
+    if (!detail) return;
+    const loadingEl = detail.querySelector(".laps-loading");
+    const emptyEl = detail.querySelector(".laps-empty");
+    const chipsEl = detail.querySelector(".laps-chips");
+    const noteEl = detail.querySelector(".laps-note");
+
+    if (!currentSessionId) {
+      chipsEl.innerHTML = "";
+      emptyEl.style.display = "";
+      emptyEl.textContent = "尚未取得目前場次資訊，請稍候再試。";
+      return;
+    }
+
+    if (!force && lapsCache.has(tid)) {
+      renderLaps(tid, lapsCache.get(tid));
+      return;
+    }
+
+    loadingEl.style.display = "";
+    emptyEl.style.display = "none";
+    noteEl.style.display = "none";
+    chipsEl.innerHTML = "";
+
+    try {
+      const res = await fetch(`/api/sessions/${currentSessionId}/laps/${tid}`);
+      if (!res.ok) throw new Error("查詢失敗");
+      const data = await res.json();
+      lapsCache.set(tid, data.laps || []);
+      renderLaps(tid, data.laps || []);
+    } catch {
+      loadingEl.style.display = "none";
+      emptyEl.style.display = "";
+      emptyEl.textContent = "查詢失敗，請稍後再試。";
+    }
+  }
+
+  function renderLaps(tid, laps) {
+    const detail = document.getElementById("detail-" + tid);
+    if (!detail) return;
+    const loadingEl = detail.querySelector(".laps-loading");
+    const emptyEl = detail.querySelector(".laps-empty");
+    const chipsEl = detail.querySelector(".laps-chips");
+    const noteEl = detail.querySelector(".laps-note");
+
+    loadingEl.style.display = "none";
+
+    if (!laps.length) {
+      emptyEl.style.display = "";
+      emptyEl.textContent = "還沒有已歸檔的圈速資料。";
+      chipsEl.innerHTML = "";
+      return;
+    }
+
+    emptyEl.style.display = "none";
+    chipsEl.innerHTML = laps
+      .map((lap) => `<span class="btn lap-chip"><b>#${lap.lap_number}</b> ${lap.lap_time_label}</span>`)
+      .join("");
+
+    // 已知的圈數比明細筆數多：代表最新一兩圈還在 InfluxDB 的批次寫入
+    // 視窗內（見 influx_writer.py 的 flush_interval），提示使用者稍後
+    // 重新整理，而不是讓人以為資料有誤。
+    const s = state.get(tid);
+    noteEl.style.display = s && s.lap_count > laps.length ? "" : "none";
+  }
+
+  rows.addEventListener("click", (ev) => {
+    const expandBtn = ev.target.closest(".expand-btn");
+    if (expandBtn) {
+      const tid = expandBtn.dataset.tid;
+      const detail = document.getElementById("detail-" + tid);
+      if (!detail) return;
+      const opening = detail.style.display === "none";
+      detail.style.display = opening ? "" : "none";
+      expandBtn.textContent = opening ? "收起" : "展開";
+      if (opening) loadLaps(tid);
+      return;
+    }
+    const refreshBtn = ev.target.closest(".refresh-btn");
+    if (refreshBtn) {
+      loadLaps(refreshBtn.dataset.tid, { force: true });
+    }
+  });
 
   // 每 50ms 只更新「本圈」數字，做本地內插讓碼表看起來即時跑動，
   // 不做整個 render()（避免不必要的 DOM 重排/reflow）。
@@ -275,6 +391,8 @@
       // 先清空舊的 state/DOM，避免殘留斷線前的過期資料。
       state.clear();
       rows.innerHTML = "";
+      lapsCache.clear();
+      currentSessionId = null;
       decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
       statusLabel.textContent = "已連線 · 同步中…";
       statusEl.className = "warn";
@@ -300,9 +418,14 @@
         updateStatus();
         return;
       }
+      if (data.type === "session_info") {
+        currentSessionId = data.session_id;
+        return;
+      }
       if (data.type === "session_reset") {
         state.clear();
         rows.innerHTML = "";
+        lapsCache.clear();
         render();
         return;
       }

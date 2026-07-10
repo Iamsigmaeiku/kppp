@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -38,9 +38,19 @@ class User(Base):
 class RaceSession(Base):
     """對應 InfluxDB session_archive 裡的同一個 session_id；SQLite 這邊只
     存給 UI/綁定用的中繼資料，圈速本身的權威資料仍在 InfluxDB。
+
+    session_date/session_number 是給人看的「今天第幾節」標籤（見
+    session_numbering.py），每天從 #1 重新開始、最多到 #100 循環——這只是
+    可重複使用的顯示用短標籤，不是永久唯一 ID，真正的資料一律還是用
+    session_id（不會重複的 sess-YYYYMMDD-HHMMSS）對應。
     """
 
     __tablename__ = "sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_date", "session_number", name="uq_session_date_number"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(primary_key=True)  # e.g. "sess-20260710-143200"
     label: Mapped[str | None] = mapped_column(default=None)
@@ -50,6 +60,8 @@ class RaceSession(Base):
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), default=None
     )
+    session_date: Mapped[date | None] = mapped_column(default=None)
+    session_number: Mapped[int | None] = mapped_column(default=None)
 
     car_bindings: Mapped[list["CarBinding"]] = relationship(back_populates="session")
 

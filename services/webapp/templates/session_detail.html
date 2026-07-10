@@ -1,7 +1,14 @@
 {% extends "base.html" %}
 
 {% block title %}{{ session_id }} · TKS Dashboard{% endblock %}
-{% block heading %}場次 {{ session_id }}{% endblock %}
+{% block heading %}
+場次
+{% if race_session and race_session.session_number %}
+第 {{ race_session.session_number }} 節（{{ race_session.session_date }}） <small style="color:var(--text-dim);">{{ session_id }}</small>
+{% else %}
+{{ session_id }}
+{% endif %}
+{% endblock %}
 
 {% block content %}
 <div class="panel">

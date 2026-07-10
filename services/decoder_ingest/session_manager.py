@@ -67,6 +67,10 @@ class SessionManager:
         session_id。回傳新的 session_id。
         """
         now = at or datetime.now(timezone.utc)
+        # 場次真的結束了：把每台車還在跑、從沒被 record_passing() 算成
+        # 正式一圈的「本圈」補記成這一節的最後一圈，歸檔資料才完整
+        # （見 LapTracker.finalize_in_progress_laps 說明）。
+        lap_tracker.finalize_in_progress_laps(at=now)
         points = self._build_archive_points(lap_tracker, at=now, trigger=trigger)
         if points:
             await writer.write_points_now(points)

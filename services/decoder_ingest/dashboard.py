@@ -13,6 +13,7 @@ _lap_tracker = None
 _on_reset = None
 _session_manager = None
 _influx_writer = None
+_on_session_started = None
 
 
 def set_lap_tracker(tracker) -> None:
@@ -50,6 +51,22 @@ def set_reset_hook(callback) -> None:
     _on_reset = callback
 
 
+def set_session_started_hook(callback) -> None:
+    """註冊一個「新場次開始」的 async callback（簽名
+    `callback(session_id: str, started_at: datetime) -> Awaitable[None]`），
+    在服務啟動的第一個場次、以及之後每次 archive_and_reset() 換發新
+    session_id 時都會被呼叫一次。供 services/webapp 掛上場次每日編號邏輯
+    （見 session_numbering.py）——decoder_ingest 自己不需要知道編號怎麼算，
+    只負責在「新場次真的開始了」的當下通知一聲。
+    """
+    global _on_session_started
+    _on_session_started = callback
+
+
+def get_session_started_hook():
+    return _on_session_started
+
+
 @app.post("/api/session/reset")
 async def reset_session() -> dict:
     # 公開即時面板不提供重置；避免現場觀眾/一般登入使用者誤觸清空賽段。
@@ -62,6 +79,12 @@ async def ws_laps(websocket: WebSocket) -> None:
     connected_clients.add(websocket)
     if _lap_tracker is not None:
         await websocket.send_json(_lap_tracker.decoder_status_message())
+        if _session_manager is not None:
+            # 讓前端知道目前是哪個 session_id，才能查詢「每一圈的圈時」
+            # 展開明細（見 GET /api/sessions/{session_id}/laps/{transponder_id}）。
+            await websocket.send_json(
+                {"type": "session_info", "session_id": _session_manager.current_session_id}
+            )
         for state in _lap_tracker.all_states():
             try:
                 await websocket.send_json(state)
@@ -121,3 +144,12 @@ async def broadcast_session_reset(*, reset_at: str) -> None:
             "reset_at": reset_at,
         }
     )
+
+
+async def broadcast_session_info(session_id: str) -> None:
+    """通知所有已連線客戶端目前的 session_id，讓前端能查詢
+    GET /api/sessions/{session_id}/laps/{transponder_id}（每一圈的圈時
+    展開明細）。在新場次開始時（服務啟動、或 archive_and_reset 換發新
+    session_id 後）廣播一次。
+    """
+    await broadcast_message({"type": "session_info", "session_id": session_id})

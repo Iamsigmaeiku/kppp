@@ -82,3 +82,74 @@ def test_bindings_by_car_number_succeeds(webapp_client):
     finally:
         set_lap_tracker(None)
         set_session_manager(None, None)
+
+
+async def _seed_race_session(webapp_app, *, session_id: str, session_number: int):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from services.webapp.models import RaceSession
+
+    tz = ZoneInfo(webapp_app.state.web_config.display_timezone)
+    today = datetime.now(tz).date()
+    async with webapp_app.state.session_factory() as db:
+        db.add(
+            RaceSession(
+                id=session_id,
+                started_at=datetime.now(tz),
+                session_date=today,
+                session_number=session_number,
+            )
+        )
+        await db.commit()
+    return today
+
+
+def test_bindings_by_session_number_resolves_correct_session(webapp_client, webapp_app):
+    import asyncio
+
+    from services.decoder_ingest.dashboard import set_lap_tracker, set_session_manager
+    from services.decoder_ingest.lap_tracker import LapTracker
+    from services.decoder_ingest.session_manager import SessionManager
+
+    # 目前正在進行的場次是 sess-live-xxx，但使用者輸入 #7 想綁定的是
+    # 今天稍早已經結束的另一節場次（sess-earlier-xxx）——確認 session_number
+    # 會解析成正確、不同於「目前這節」的 session_id。
+    asyncio.run(
+        _seed_race_session(webapp_app, session_id="sess-earlier-session", session_number=7)
+    )
+
+    lap_tracker = LapTracker(car_number_map={"AABBCCDDEEFF": "12"})
+    set_lap_tracker(lap_tracker)
+    set_session_manager(SessionManager.start_new(), None)
+    try:
+        webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+        r = webapp_client.post(
+            "/api/bindings", json={"car_number": "12", "session_number": 7}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["session_id"] == "sess-earlier-session"
+        assert body["car_number"] == "12"
+    finally:
+        set_lap_tracker(None)
+        set_session_manager(None, None)
+
+
+def test_bindings_by_session_number_404_when_not_found(webapp_client):
+    from services.decoder_ingest.dashboard import set_lap_tracker, set_session_manager
+    from services.decoder_ingest.lap_tracker import LapTracker
+    from services.decoder_ingest.session_manager import SessionManager
+
+    lap_tracker = LapTracker(car_number_map={"AABBCCDDEEFF": "13"})
+    set_lap_tracker(lap_tracker)
+    set_session_manager(SessionManager.start_new(), None)
+    try:
+        webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+        r = webapp_client.post(
+            "/api/bindings", json={"car_number": "13", "session_number": 999}
+        )
+        assert r.status_code == 404
+    finally:
+        set_lap_tracker(None)
+        set_session_manager(None, None)

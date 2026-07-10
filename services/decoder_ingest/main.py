@@ -17,7 +17,9 @@ from .dashboard import (
     broadcast_capture,
     broadcast_decoder_status,
     broadcast_lap_update,
+    broadcast_session_info,
     broadcast_session_reset,
+    get_session_started_hook,
     set_lap_tracker,
     set_reset_hook,
     set_session_manager,
@@ -236,6 +238,28 @@ async def handle_feed_result(
         )
 
 
+async def _on_new_session_started(session_manager: SessionManager) -> None:
+    """新場次真的開始了（服務啟動的第一節、或 archive_and_reset 換發新
+    session_id 後）都要呼叫一次：讓前端知道目前的 session_id（供「每一圈
+    的圈時」展開明細查詢），並讓 webapp 有機會補上場次每日編號（見
+    dashboard.py 的 set_session_started_hook/session_numbering.py）。
+    webapp 那端若失敗（例如 SQLite 暫時打不開），不該讓這裡的場次重置
+    流程整個掛掉，所以包一層 try/except 只記警告。
+    """
+    await broadcast_session_info(session_manager.current_session_id)
+    hook = get_session_started_hook()
+    if hook is not None:
+        try:
+            await hook(
+                session_manager.current_session_id,
+                session_manager.session_started_at,
+            )
+        except Exception:
+            logger.exception(
+                "session_started hook failed (webapp session numbering); continuing"
+            )
+
+
 async def lap_timer_broadcast_loop(
     lap_tracker: LapTracker,
     *,
@@ -265,6 +289,7 @@ async def lap_timer_broadcast_loop(
             await session_manager.archive_and_reset(
                 lap_tracker, writer, trigger="auto_idle"
             )
+            await _on_new_session_started(session_manager)
             await broadcast_session_reset(
                 reset_at=datetime.now(timezone.utc).isoformat()
             )
@@ -598,6 +623,9 @@ async def run_service(
         # middleware；dashboard_app 和 webapp 的 app 是同一個 FastAPI
         # instance（見 services/webapp/app.py），這裡只是把它組裝完整。
         configure_app()
+        # 服務啟動時的第一節場次也要走一次「新場次開始」通知，
+        # 否則要等到第一次 auto_idle 重置才會第一次被編號/廣播 session_id。
+        await _on_new_session_started(session_manager)
 
         uv_config = uvicorn.Config(
             dashboard_app,

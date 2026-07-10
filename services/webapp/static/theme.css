@@ -453,6 +453,21 @@ table.unreg-table .copy-btn {
 table.unreg-table .copy-btn:hover { color: var(--text); border-color: var(--accent); }
 table.unreg-table .copy-btn.copied { color: var(--ok); border-color: var(--ok); }
 
+.expand-btn, .refresh-btn {
+  font-size: 0.75rem;
+  padding: 0.3rem 0.8rem;
+}
+tr.detail-row td {
+  background: var(--panel-alt);
+  padding: 0.75rem 1rem;
+  white-space: normal;
+}
+.laps-detail { display: flex; flex-direction: column; gap: 0.5rem; }
+.laps-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.lap-chip { cursor: default; font-variant-numeric: tabular-nums; }
+.laps-loading, .laps-empty { color: var(--text-dim); font-size: 0.85rem; }
+.laps-note { color: var(--warn); font-size: 0.8rem; }
+
 @media (max-width: 720px) {
   h1 { font-size: 1.4rem; }
   table.dash-table { font-size: 0.92rem; }

@@ -17,8 +17,17 @@
       </thead>
       <tbody>
         {% for s in sessions %}
+        {% set rs = numbering.get(s.session_id) %}
         <tr>
-          <td class="tid"><a href="/sessions/{{ s.session_id }}">{{ s.session_id }}</a></td>
+          <td class="tid">
+            <a href="/sessions/{{ s.session_id }}">
+              {% if rs and rs.session_number %}
+              第 {{ rs.session_number }} 節（{{ rs.session_date }}）
+              {% else %}
+              {{ s.session_id }}
+              {% endif %}
+            </a>
+          </td>
           <td>{{ s.started_at | localtime }}</td>
           <td>{{ s.ended_at | localtime }}</td>
         </tr>

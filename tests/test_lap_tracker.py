@@ -89,3 +89,45 @@ def test_tick_and_received_at_disagreement_logs_warning(caplog):
     # 應記警告，且 tick-based 的值仍被採用。
     assert state["last_lap_time"] == pytest.approx(20.0, abs=1e-6)
     assert any("lap_time mismatch" in rec.message for rec in caplog.records)
+
+
+def test_finalize_in_progress_laps_counts_final_lap():
+    tracker = LapTracker(noise_threshold_sec=1.0, max_lap_time_sec=600.0)
+    tracker.set_decoder_connected("dec-1", True)
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    tracker.record_passing(_event(received_at=t0))
+    tracker.record_passing(_event(received_at=t0 + timedelta(seconds=50.0)))
+
+    tracker.finalize_in_progress_laps(at=t0 + timedelta(seconds=50.0 + 42.0))
+
+    state = tracker.all_states()[0]
+    assert state["lap_count"] == 2
+    assert state["last_lap_time"] == pytest.approx(42.0, abs=1e-6)
+    assert state["lap_history"][-1] == pytest.approx(42.0, abs=1e-6)
+    assert state["timer_active"] is False
+
+
+def test_finalize_in_progress_laps_skips_too_short_or_too_long():
+    tracker = LapTracker(noise_threshold_sec=10.0, max_lap_time_sec=600.0)
+    tracker.set_decoder_connected("dec-1", True)
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    tracker.record_passing(_event(received_at=t0))
+
+    # 才過 3 秒就結束場次：太短，不該被算成一圈。
+    tracker.finalize_in_progress_laps(at=t0 + timedelta(seconds=3.0))
+    state = tracker.all_states()[0]
+    assert state["lap_count"] == 0
+
+    tracker2 = LapTracker(noise_threshold_sec=1.0, max_lap_time_sec=600.0)
+    tracker2.set_decoder_connected("dec-1", True)
+    tracker2.record_passing(_event(received_at=t0))
+    # 過了快 12 分鐘才結束場次：早就離場，不該被算成一圈。
+    tracker2.finalize_in_progress_laps(at=t0 + timedelta(seconds=700.0))
+    state2 = tracker2.all_states()[0]
+    assert state2["lap_count"] == 0
+
+
+def test_finalize_in_progress_laps_noop_without_passing():
+    tracker = LapTracker(noise_threshold_sec=1.0)
+    tracker.finalize_in_progress_laps()
+    assert tracker.all_states() == []

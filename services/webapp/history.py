@@ -1,20 +1,28 @@
-"""排行榜、場次瀏覽、單一場次的每一圈展開對照——全部讀 InfluxDB（見
-influx_reader.py），不碰 SQLite（sessions 表只在使用者綁定車號時才會有
-資料，瀏覽歷史圈速不需要使用者登入）。
+"""排行榜、場次瀏覽、單一場次的每一圈展開對照——主要讀 InfluxDB（見
+influx_reader.py），瀏覽歷史圈速不需要使用者登入。
 
 InfluxDB 連線失敗（例如維護中、網路問題）時這些頁面應該優雅降級成「暫時
 無法讀取歷史資料」，而不是整頁 500——現場人員在 InfluxDB 短暫離線時應該
 還能看首頁即時面板，不該連帶看不了排行榜頁面本身。
+
+場次列表/明細額外查一次 SQLite，把每個 session_id 對應的「今天第幾節」
+編號（見 session_numbering.py）標出來給人看；這是純顯示用的補充資訊，
+SQLite 查詢失敗一樣不該讓整頁掛掉，只是退回顯示原始 session_id。
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.decoder_ingest.influx_reader import InfluxReader
+
+from .deps import get_db
+from .models import RaceSession
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +89,7 @@ async def leaderboard_page(request: Request):
 
 
 @router.get("/sessions", response_class=HTMLResponse)
-async def sessions_page(request: Request):
+async def sessions_page(request: Request, db: AsyncSession = Depends(get_db)):
     reader = _get_reader(request)
     influx_unavailable = False
     sessions = []
@@ -91,15 +99,33 @@ async def sessions_page(request: Request):
         logger.exception("sessions: failed to read from InfluxDB")
         influx_unavailable = True
 
+    numbering: dict[str, RaceSession] = {}
+    try:
+        if sessions:
+            result = await db.execute(
+                select(RaceSession).where(
+                    RaceSession.id.in_([s.session_id for s in sessions])
+                )
+            )
+            numbering = {rs.id: rs for rs in result.scalars().all()}
+    except Exception:
+        logger.exception("sessions: failed to read session numbering from SQLite")
+
     return request.app.state.templates.TemplateResponse(
         request,
         "sessions.html",
-        {"sessions": sessions, "influx_unavailable": influx_unavailable},
+        {
+            "sessions": sessions,
+            "numbering": numbering,
+            "influx_unavailable": influx_unavailable,
+        },
     )
 
 
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
-async def session_detail_page(request: Request, session_id: str):
+async def session_detail_page(
+    request: Request, session_id: str, db: AsyncSession = Depends(get_db)
+):
     reader = _get_reader(request)
     try:
         summary = await reader.get_session_summary(session_id)
@@ -110,10 +136,16 @@ async def session_detail_page(request: Request, session_id: str):
     if not summary:
         raise HTTPException(status_code=404, detail="session not found or empty")
 
+    race_session: RaceSession | None = None
+    try:
+        race_session = await db.get(RaceSession, session_id)
+    except Exception:
+        logger.exception("session_detail: failed to read session numbering from SQLite")
+
     return request.app.state.templates.TemplateResponse(
         request,
         "session_detail.html",
-        {"session_id": session_id, "summary": summary},
+        {"session_id": session_id, "summary": summary, "race_session": race_session},
     )
 
 

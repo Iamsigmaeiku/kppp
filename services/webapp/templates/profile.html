@@ -56,7 +56,15 @@
               loading: false,
               error: null,
             }'>
-          <td class="tid"><a href="/sessions/{{ b.session_id }}">{{ b.session_id }}</a></td>
+          <td class="tid">
+            <a href="/sessions/{{ b.session_id }}">
+              {% if b.session and b.session.session_number %}
+              第 {{ b.session.session_number }} 節（{{ b.session.session_date }}）
+              {% else %}
+              {{ b.session_id }}
+              {% endif %}
+            </a>
+          </td>
           <td class="car">{{ b.car_number or b.transponder_id }}</td>
           <td>{{ b.bound_at | localtime }}</td>
           <td>
@@ -125,14 +133,16 @@
 
 <div class="panel">
   <div class="panel-header">綁定新的車號</div>
-  <div style="padding:1rem;" x-data="{ carNumber: '', status: null }">
+  <div style="padding:1rem;" x-data="{ carNumber: '', sessionNumber: '', status: null }">
     <input type="text" placeholder="輸入你被配到的車號（見即時面板的「車號」欄）" x-model="carNumber"
       style="padding:0.5rem 0.75rem; border-radius:8px; border:1px solid var(--border); background:var(--panel-alt); color:var(--text); margin-right:0.5rem;" />
+    <input type="number" min="1" max="100" placeholder="場次編號（留空＝目前這節，例如 12）" x-model="sessionNumber"
+      style="padding:0.5rem 0.75rem; border-radius:8px; border:1px solid var(--border); background:var(--panel-alt); color:var(--text); margin-right:0.5rem; width:12rem;" />
     <button @click="
       fetch('/api/bindings', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({car_number: carNumber})
+        body: JSON.stringify({car_number: carNumber, session_number: sessionNumber ? parseInt(sessionNumber, 10) : null})
       })
         .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.detail); return d; })
         .then(() => location.reload())

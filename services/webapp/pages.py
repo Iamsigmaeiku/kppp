@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from .avatars import avatar_url_for
 from .deps import get_current_user, get_db
@@ -58,6 +59,7 @@ async def profile_page(
     binding_result = await db.execute(
         select(CarBinding)
         .where(CarBinding.user_id == user.id)
+        .options(selectinload(CarBinding.session))
         .order_by(CarBinding.bound_at.desc())
     )
     bindings = binding_result.scalars().all()

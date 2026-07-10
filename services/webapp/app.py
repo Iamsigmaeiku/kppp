@@ -18,10 +18,10 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from services.decoder_ingest.config import load_influx_config
-from services.decoder_ingest.dashboard import app as decoder_app
+from services.decoder_ingest.dashboard import app as decoder_app, set_session_started_hook
 from services.decoder_ingest.influx_reader import InfluxReader
 
-from . import ai_coach, auth, avatars, car_bindings, history, pages
+from . import ai_coach, auth, avatars, car_bindings, history, pages, session_numbering
 from .config import load_web_config
 from .db import make_engine, make_session_factory
 
@@ -106,5 +106,9 @@ def configure_app() -> None:
         StaticFiles(directory=str(WEBAPP_DIR / "static")),
         name="webapp-static",
     )
+
+    # 場次每日編號（見 session_numbering.py）：decoder_ingest 開新場次時
+    # 會透過這個 hook 通知，不需要知道 SQLite/編號邏輯本身怎麼運作。
+    set_session_started_hook(session_numbering.on_session_started)
 
     app.state.webapp_configured = True
