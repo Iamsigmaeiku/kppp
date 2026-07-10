@@ -44,6 +44,7 @@ class WebAppConfig:
     avatar_upload_dir: Path
     google: GoogleOAuthConfig | None
     ai_coach: AiCoachConfig | None
+    display_timezone: str
 
 
 def _env(name: str, default: str = "") -> str:
@@ -97,4 +98,5 @@ def load_web_config() -> WebAppConfig:
         avatar_upload_dir=Path(_env("AVATAR_UPLOAD_DIR", "uploads/avatars")),
         google=google,
         ai_coach=ai_coach,
+        display_timezone=_env("DISPLAY_TIMEZONE", "Asia/Taipei"),
     )

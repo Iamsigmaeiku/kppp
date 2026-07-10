@@ -84,6 +84,15 @@ class LapTracker:
     def car_number_for(self, transponder_id: str) -> str:
         return self._car_number_map[transponder_id.upper()]
 
+    def transponder_id_for_car(self, car_number: str) -> str | None:
+        """反查車號對應的 transponder_id（供使用者用車號綁定，而非直接貼
+        UID）。只找已在 car_number_map 註冊的車號；車號不存在時回傳 None。
+        """
+        for tid, car in self._car_number_map.items():
+            if car == car_number:
+                return tid
+        return None
+
     def set_decoder_connected(self, decoder_id: str, connected: bool) -> None:
         self._known_decoder_ids.add(decoder_id)
         was_connected = self.decoder_connected

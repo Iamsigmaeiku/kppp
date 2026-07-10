@@ -14,7 +14,12 @@
     <div id="authStatus" x-data="{ user: null }" x-init="fetch('/api/auth/me').then(r => r.json()).then(d => user = d.user)">
       <template x-if="user">
         <span class="btn" style="display:inline-flex;align-items:center;gap:0.5rem;">
-          <img :src="user.avatar_url || 'data:,'" style="width:1.5rem;height:1.5rem;border-radius:50%;object-fit:cover;background:var(--panel-alt);" />
+          <template x-if="user.avatar_url">
+            <img :src="user.avatar_url" style="width:1.5rem;height:1.5rem;border-radius:50%;object-fit:cover;background:var(--panel-alt);" />
+          </template>
+          <template x-if="!user.avatar_url">
+            <span class="avatar-fallback" style="width:1.5rem;height:1.5rem;font-size:0.75rem;" x-text="(user.display_name || user.email || '?').trim().charAt(0).toUpperCase()"></span>
+          </template>
           <span x-text="user.display_name || user.email"></span>
         </span>
       </template>

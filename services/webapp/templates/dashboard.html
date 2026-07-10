@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+
+{% block title %}即時面板 · TKS Dashboard{% endblock %}
+{% block heading %}即時面板{% endblock %}
+
+{% block content %}
+<div class="dash-toolbar">
+  <div id="unregisteredBadge"><span>⚠</span><span class="label">0 未配對</span></div>
+  <div id="status"><span class="dot"></span><span class="label">連線中…</span></div>
+  <button id="resetBtn" class="btn" type="button">重置賽段</button>
+</div>
+
+<div class="panel">
+  <div class="table-wrap">
+    <table class="dash-table">
+      <thead>
+        <tr>
+          <th>排名</th>
+          <th>車號</th>
+          <th>UID</th>
+          <th>圈數</th>
+          <th>上圈</th>
+          <th>最佳</th>
+          <th>本圈</th>
+          <th>原始資料</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<details id="unregisteredPanel" class="panel" open>
+  <summary>⚠ 未配對UID<span id="unregisteredMeta">0 台</span></summary>
+  <table class="unreg-table" id="unregisteredTable" style="display:none;">
+    <thead>
+      <tr>
+        <th>UID</th>
+        <th>圈數</th>
+        <th>最佳單圈</th>
+        <th>最後出現</th>
+      </tr>
+    </thead>
+    <tbody id="unregisteredRows"></tbody>
+  </table>
+  <div id="unregisteredEmpty">目前沒有未配對的UID。有新的車手/車號時，若CAR_NUMBER_MAP還沒登記，會出現在這裡，方便直接複製UID去補設定。</div>
+</details>
+
+<details id="capturesPanel" class="panel">
+  <summary>即時封包 <span id="captureMeta">0 筆 · —</span></summary>
+  <ul id="captures"></ul>
+</details>
+
+<script>
+  const rows = document.getElementById("rows");
+  const statusEl = document.getElementById("status");
+  const statusLabel = statusEl.querySelector(".label");
+  const capturesEl = document.getElementById("captures");
+  const captureMetaEl = document.getElementById("captureMeta");
+  const unregisteredBadge = document.getElementById("unregisteredBadge");
+  const unregisteredTable = document.getElementById("unregisteredTable");
+  const unregisteredRows = document.getElementById("unregisteredRows");
+  const unregisteredEmpty = document.getElementById("unregisteredEmpty");
+  const unregisteredMetaEl = document.getElementById("unregisteredMeta");
+  const resetBtn = document.getElementById("resetBtn");
+  const state = new Map();
+  const MAX_CAPTURES = 30;
+  let decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
+  let captureCount = 0;
+
+  function fmtLastSeen(iso) {
+    if (!iso) return "—";
+    try {
+      return new Date(iso).toLocaleTimeString();
+    } catch {
+      return "—";
+    }
+  }
+
+  // 未配對 transponder 面板：從 state 篩出 registered === false 的項目，
+  // 依最後出現時間新到舊排序，方便現場對照剛跑過的車。
+  function renderUnregistered() {
+    const unregistered = [...state.values()]
+      .filter((s) => s.registered === false)
+      .sort((a, b) => {
+        const ta = a.last_passing_at ? new Date(a.last_passing_at).getTime() : 0;
+        const tb = b.last_passing_at ? new Date(b.last_passing_at).getTime() : 0;
+        return tb - ta;
+      });
+
+    const count = unregistered.length;
+    unregisteredMetaEl.textContent = `${count} 台`;
+    unregisteredBadge.querySelector(".label").textContent = `${count} 未配對`;
+    unregisteredBadge.classList.toggle("show", count > 0);
+
+    unregisteredTable.style.display = count > 0 ? "" : "none";
+    unregisteredEmpty.style.display = count > 0 ? "none" : "";
+
+    unregisteredRows.innerHTML = "";
+    for (const s of unregistered) {
+      const tr = document.createElement("tr");
+      const tid = s.transponder_id || "—";
+      tr.innerHTML = `
+        <td class="tid-cell">${tid}<button class="copy-btn" type="button" data-tid="${tid}">複製</button></td>
+        <td>${s.lap_count ?? 0}</td>
+        <td>${fmt(s.best_lap_time)}</td>
+        <td>${fmtLastSeen(s.last_passing_at)}</td>`;
+      unregisteredRows.appendChild(tr);
+    }
+  }
+
+  unregisteredRows.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".copy-btn");
+    if (!btn) return;
+    const tid = btn.dataset.tid;
+    navigator.clipboard?.writeText(tid).then(() => {
+      btn.textContent = "已複製";
+      btn.classList.add("copied");
+      setTimeout(() => {
+        btn.textContent = "複製";
+        btn.classList.remove("copied");
+      }, 1500);
+    }).catch(() => {});
+  });
+
+  function fmt(sec) {
+    if (sec == null || Number.isNaN(sec)) return "—";
+    return sec.toFixed(3) + "s";
+  }
+
+  // 排序直接信任伺服器算好的 rank 欄位（見 LapTracker._to_broadcast_dict），
+  // 不在前端重算一份排序邏輯——避免兩份邏輯久了互相對不上。
+  function compareStates(a, b) {
+    return (a.rank ?? Infinity) - (b.rank ?? Infinity);
+  }
+
+  // rowKey：一律用 transponder_id（穩定、唯一，不受 car_number 是否含 "?" 前綴影響），
+  // 避免同一台車在不同訊息路徑（單筆 vs 全量快照）之間因 key 計算不一致而被誤判成新 row 造成閃爍。
+  function rowKey(data) {
+    return data.transponder_id;
+  }
+
+  function updateStatus() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const multi = decoderStatus.total_count > 1;
+    if (decoderStatus.connected) {
+      statusLabel.textContent = multi
+        ? `已連線 · Decoder ${decoderStatus.connected_count}/${decoderStatus.total_count} 運行中`
+        : "已連線 · Decoder 運行中";
+      statusEl.className =
+        multi && decoderStatus.connected_count < decoderStatus.total_count ? "warn" : "ok";
+    } else {
+      statusLabel.textContent = multi
+        ? "已連線 · 全部 Decoder 斷線（計時已暫停）"
+        : "已連線 · Decoder 斷線（計時已暫停）";
+      statusEl.className = "warn";
+    }
+  }
+
+  function timerText(s) {
+    if (s.current_lap_elapsed == null) return "—";
+    if (!s.timer_active) return fmt(s.current_lap_elapsed);
+    const recv = s._recvPerf ?? performance.now();
+    const delta = (performance.now() - recv) / 1000;
+    return fmt(s.current_lap_elapsed + Math.max(delta, 0));
+  }
+
+  function ensureRow(id) {
+    let tr = document.getElementById("row-" + id);
+    if (tr) return tr;
+    tr = document.createElement("tr");
+    tr.id = "row-" + id;
+    tr.innerHTML = `
+      <td class="rank"><span class="rank-badge"></span></td>
+      <td class="car"></td>
+      <td class="tid"></td>
+      <td class="laps"></td>
+      <td class="last"></td>
+      <td class="best"></td>
+      <td class="timer"><span class="timer-value"></span><span class="timer-badge"></span></td>
+      <td class="raw"></td>`;
+    rows.appendChild(tr);
+    return tr;
+  }
+
+  function render() {
+    const activeKeys = new Set(state.keys());
+    for (const tr of [...rows.querySelectorAll("tr")]) {
+      const id = tr.id.slice(4);
+      if (!activeKeys.has(id)) tr.remove();
+    }
+
+    const sorted = [...state.values()].sort(compareStates);
+
+    sorted.forEach((s, idx) => {
+      const id = rowKey(s);
+      const tr = ensureRow(id);
+      const rank = idx + 1;
+
+      tr.querySelector(".rank-badge").textContent = rank;
+      tr.querySelector(".car").textContent = s.car_number || s.transponder_id || "—";
+      tr.querySelector(".tid").textContent = s.transponder_id || "—";
+      tr.querySelector(".laps").textContent = s.lap_count ?? 0;
+      tr.querySelector(".last").textContent = fmt(s.last_lap_time);
+      tr.querySelector(".best").textContent = fmt(s.best_lap_time);
+
+      const timerEl = tr.querySelector(".timer");
+      timerEl.querySelector(".timer-value").textContent = timerText(s);
+      timerEl.classList.toggle("paused", s.timer_active === false);
+
+      tr.querySelector(".raw").textContent = s.raw_payload || "—";
+      tr.classList.toggle("unregistered", s.registered === false);
+
+      const isTopRank = s.best_lap_time != null && rank <= 3;
+      tr.classList.toggle("rank-1", isTopRank && rank === 1);
+      tr.classList.toggle("rank-2", isTopRank && rank === 2);
+      tr.classList.toggle("rank-3", isTopRank && rank === 3);
+
+      // 依排序後順序 append，將既有 row 移到正確位置（DOM 中該順序即排行榜順序）
+      rows.appendChild(tr);
+    });
+
+    renderUnregistered();
+  }
+
+  // 每 50ms 只更新「本圈」數字，做本地內插讓碼表看起來即時跑動，
+  // 不做整個 render()（避免不必要的 DOM 重排/reflow）。
+  function tickTimers() {
+    for (const [id, s] of state) {
+      const tr = document.getElementById("row-" + id);
+      if (!tr) continue;
+      tr.querySelector(".timer-value").textContent = timerText(s);
+    }
+  }
+  setInterval(tickTimers, 50);
+
+  function pushCapture(data) {
+    captureCount++;
+    const li = document.createElement("li");
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    const time = new Date(data.timestamp).toLocaleTimeString();
+    ts.textContent = time;
+    li.appendChild(ts);
+    li.appendChild(document.createTextNode(data.ascii || data.hex || ""));
+    capturesEl.prepend(li);
+    while (capturesEl.children.length > MAX_CAPTURES) {
+      capturesEl.removeChild(capturesEl.lastChild);
+    }
+    captureMetaEl.textContent = `${captureCount} 筆 · 最新 ${time}`;
+  }
+
+  // ---- WebSocket：自動重連（指數退避 1s -> 2s -> 4s -> 上限 10s）----
+  let ws = null;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    const delay = Math.min(1000 * 2 ** reconnectAttempts, 10000);
+    reconnectAttempts++;
+    statusLabel.textContent = `連線中斷，${(delay / 1000).toFixed(0)}s 後重試…`;
+    statusEl.className = "err";
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectWebSocket();
+    }, delay);
+  }
+
+  function connectWebSocket() {
+    const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${wsProto}//${location.host}/ws/laps`);
+
+    ws.onopen = () => {
+      reconnectAttempts = 0;
+      // 重連後 server 會重送 decoder_status + all_states() 全量快照，
+      // 先清空舊的 state/DOM，避免殘留斷線前的過期資料。
+      state.clear();
+      rows.innerHTML = "";
+      decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
+      statusLabel.textContent = "已連線 · 同步中…";
+      statusEl.className = "warn";
+      updateStatus();
+    };
+
+    ws.onclose = () => {
+      scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
+
+    ws.onmessage = (ev) => {
+      const data = JSON.parse(ev.data);
+      if (data.type === "capture") {
+        pushCapture(data);
+        return;
+      }
+      if (data.type === "decoder_status") {
+        decoderStatus = data;
+        updateStatus();
+        return;
+      }
+      if (data.type === "session_reset") {
+        state.clear();
+        rows.innerHTML = "";
+        render();
+        return;
+      }
+      data._recvPerf = performance.now();
+      state.set(rowKey(data), data);
+      render();
+    };
+  }
+
+  resetBtn.addEventListener("click", async () => {
+    if (!confirm("確定要重置本場所有計時資料？此動作無法復原。")) return;
+    resetBtn.disabled = true;
+    try {
+      const res = await fetch("/api/session/reset", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // 成功後畫面會透過 WS session_reset 訊息清空，這裡不需要另外處理。
+    } catch (err) {
+      alert("重置失敗，請稍後再試。");
+    } finally {
+      resetBtn.disabled = false;
+    }
+  });
+
+  connectWebSocket();
+</script>
+{% endblock %}

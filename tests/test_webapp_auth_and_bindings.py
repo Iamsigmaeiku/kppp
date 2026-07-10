@@ -34,7 +34,7 @@ def test_logout_clears_session(webapp_client):
 
 
 def test_bindings_requires_login(webapp_client):
-    r = webapp_client.post("/api/bindings", json={"transponder_id": "AABBCC"})
+    r = webapp_client.post("/api/bindings", json={"car_number": "11"})
     assert r.status_code == 401
 
 
@@ -43,5 +43,42 @@ def test_bindings_fails_when_lap_tracker_not_initialized(webapp_client):
     # get_session_manager() 恆回傳 None，bind 應該明確地回 503 而不是
     # 假裝綁定成功。
     webapp_client.get("/api/auth/dev-login", follow_redirects=False)
-    r = webapp_client.post("/api/bindings", json={"transponder_id": "AABBCC"})
+    r = webapp_client.post("/api/bindings", json={"car_number": "11"})
     assert r.status_code == 503
+
+
+def test_bindings_rejects_unknown_car_number(webapp_client):
+    from services.decoder_ingest.dashboard import set_lap_tracker, set_session_manager
+    from services.decoder_ingest.lap_tracker import LapTracker
+    from services.decoder_ingest.session_manager import SessionManager
+
+    lap_tracker = LapTracker(car_number_map={"AABBCCDDEEFF": "11"})
+    set_lap_tracker(lap_tracker)
+    set_session_manager(SessionManager.start_new(), None)
+    try:
+        webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+        r = webapp_client.post("/api/bindings", json={"car_number": "99"})
+        assert r.status_code == 404
+    finally:
+        set_lap_tracker(None)
+        set_session_manager(None, None)
+
+
+def test_bindings_by_car_number_succeeds(webapp_client):
+    from services.decoder_ingest.dashboard import set_lap_tracker, set_session_manager
+    from services.decoder_ingest.lap_tracker import LapTracker
+    from services.decoder_ingest.session_manager import SessionManager
+
+    lap_tracker = LapTracker(car_number_map={"AABBCCDDEEFF": "11"})
+    set_lap_tracker(lap_tracker)
+    set_session_manager(SessionManager.start_new(), None)
+    try:
+        webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+        r = webapp_client.post("/api/bindings", json={"car_number": "11"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["car_number"] == "11"
+        assert body["transponder_id"] == "AABBCCDDEEFF"
+    finally:
+        set_lap_tracker(None)
+        set_session_manager(None, None)

@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/bindings")
 
 
 class BindRequest(BaseModel):
-    transponder_id: str
+    car_number: str
 
 
 def _current_session_id() -> str:
@@ -50,11 +50,11 @@ async def _ensure_session_row(db: AsyncSession, session_id: str) -> None:
     await db.flush()
 
 
-def _car_number_for(transponder_id: str) -> str | None:
+def _transponder_id_for_car(car_number: str) -> str | None:
     lap_tracker = get_lap_tracker()
-    if lap_tracker is None or not lap_tracker.is_registered(transponder_id):
+    if lap_tracker is None:
         return None
-    return lap_tracker.car_number_for(transponder_id)
+    return lap_tracker.transponder_id_for_car(car_number)
 
 
 @router.post("")
@@ -63,11 +63,19 @@ async def bind_car(
     user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    transponder_id = body.transponder_id.strip().upper()
-    if not transponder_id:
-        raise HTTPException(status_code=400, detail="transponder_id 不可為空")
+    car_number = body.car_number.strip()
+    if not car_number:
+        raise HTTPException(status_code=400, detail="車號不可為空")
 
     session_id = _current_session_id()
+
+    # 使用者只認得車號，實際綁定仍以 transponder_id 為準（同一顆晶片才是
+    # 真正的計時識別碼）；車號不存在於目前的 CAR_NUMBER_MAP 代表現場還沒
+    # 登記這個車號，明確回錯誤而不是假裝綁定成功。
+    transponder_id = _transponder_id_for_car(car_number)
+    if transponder_id is None:
+        raise HTTPException(status_code=404, detail="找不到這個車號，請確認車號是否正確")
+
     await _ensure_session_row(db, session_id)
 
     result = await db.execute(
@@ -80,7 +88,7 @@ async def bind_car(
 
     if existing_binding is not None:
         if existing_binding.user_id != user.id:
-            raise HTTPException(status_code=409, detail="這支車號這節已經被其他人綁定")
+            raise HTTPException(status_code=409, detail="這個車號這節已經被其他人綁定")
         return {
             "status": "ok",
             "session_id": session_id,
@@ -92,7 +100,7 @@ async def bind_car(
         user_id=user.id,
         session_id=session_id,
         transponder_id=transponder_id,
-        car_number=_car_number_for(transponder_id),
+        car_number=car_number,
     )
     db.add(binding)
     await db.commit()

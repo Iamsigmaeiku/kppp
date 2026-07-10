@@ -19,8 +19,8 @@
         {% for s in sessions %}
         <tr>
           <td class="tid"><a href="/sessions/{{ s.session_id }}">{{ s.session_id }}</a></td>
-          <td>{{ s.started_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
-          <td>{{ s.ended_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+          <td>{{ s.started_at | localtime }}</td>
+          <td>{{ s.ended_at | localtime }}</td>
         </tr>
         {% endfor %}
       </tbody>

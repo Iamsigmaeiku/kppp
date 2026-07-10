@@ -18,6 +18,18 @@ from .models import AiCoachReport, CarBinding, User
 router = APIRouter()
 
 
+@router.get("/", response_class=HTMLResponse)
+@router.get("/dashboard", response_class=HTMLResponse)
+@router.get("/dashboard/", response_class=HTMLResponse)
+@router.get("/dashboards", response_class=HTMLResponse)
+@router.get("/dashboards/", response_class=HTMLResponse)
+async def dashboard_page(request: Request):
+    # 外部入口曾把公開網址做成 /dashboards，容易跟 Grafana 預設路由撞名；
+    # 這幾個別名都導回同一個即時面板，避免使用者因舊連結/錯路徑落到別的
+    # 服務（沿用原本 decoder_ingest/dashboard.py 的行為）。
+    return request.app.state.templates.TemplateResponse(request, "dashboard.html", {})
+
+
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
     if user is not None:

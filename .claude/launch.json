@@ -4,7 +4,11 @@
     {
       "name": "kpp-dashboard",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "services.decoder_ingest.main", "--with-dashboard", "--dry-run", "--replay", "services/decoder_ingest/raw_capture.log"],
+      "runtimeArgs": [
+        "-c",
+        "import os; os.environ['DASHBOARD_PORT']='8010'; os.environ['DASHBOARD_HOST']='127.0.0.1'; import runpy; runpy.run_module('services.decoder_ingest.main', run_name='__main__')",
+        "--with-dashboard", "--dry-run", "--replay", "services/decoder_ingest/raw_capture.log"
+      ],
       "port": 8010
     }
   ]

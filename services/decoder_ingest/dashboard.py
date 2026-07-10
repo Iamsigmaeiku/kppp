@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse
 
 app = FastAPI(title="TKS Dashboard")
 connected_clients: set[WebSocket] = set()
-STATIC_DIR = Path(__file__).parent / "static"
 
 _lap_tracker = None
 _on_reset = None
@@ -51,21 +48,6 @@ def set_reset_hook(callback) -> None:
     """
     global _on_reset
     _on_reset = callback
-
-
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "dashboard.html")
-
-
-@app.get("/dashboard")
-@app.get("/dashboard/")
-@app.get("/dashboards")
-@app.get("/dashboards/")
-async def dashboard_alias() -> FileResponse:
-    # 外部入口曾把公開網址做成 /dashboards，容易跟 Grafana 預設路由撞名。
-    # 這裡直接回自己的 dashboard，避免使用者因舊連結/錯路徑落到別的服務。
-    return FileResponse(STATIC_DIR / "dashboard.html")
 
 
 @app.post("/api/session/reset")
