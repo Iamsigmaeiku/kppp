@@ -69,3 +69,48 @@ async def test_car_binding_allows_same_transponder_in_different_sessions():
             models.CarBinding(user_id=user.id, session_id="sess-2", transponder_id="AABBCC")
         )
         await session.commit()  # 不同 session_id，不應該衝突
+
+
+async def test_car_binding_unique_user_session_blocks_second_car():
+    """一人一節只能綁一台車。"""
+    session_factory = await _make_session_factory()
+    now = datetime.now(timezone.utc)
+
+    async with session_factory() as session:
+        user = models.User(google_sub="a", email="a@example.com", created_at=now)
+        session.add_all(
+            [
+                user,
+                models.RaceSession(id="sess-1", started_at=now),
+            ]
+        )
+        await session.commit()
+
+        session.add(
+            models.CarBinding(
+                user_id=user.id, session_id="sess-1", transponder_id="AAAAAA", car_number="19"
+            )
+        )
+        await session.commit()
+
+        session.add(
+            models.CarBinding(
+                user_id=user.id, session_id="sess-1", transponder_id="BBBBBB", car_number="17"
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+
+
+async def test_public_display_name_prefers_nickname():
+    now = datetime.now(timezone.utc)
+    user = models.User(
+        google_sub="a",
+        email="a@example.com",
+        display_name="Google Name",
+        nickname="賽道暱稱",
+        created_at=now,
+    )
+    assert models.public_display_name(user) == "賽道暱稱"
+    user.nickname = None
+    assert models.public_display_name(user) == "Google Name"

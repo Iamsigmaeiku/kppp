@@ -55,3 +55,39 @@ def test_ai_coach_report_schema_accepts_minimal_valid_payload():
     )
     assert report.strengths == []
     assert report.lap_observations == []
+
+
+def test_extract_message_content_prefers_content():
+    from services.webapp.ai_coach import _extract_message_content
+
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"summary":"x","confidence_score":1}',
+                    "reasoning_content": "thinking...",
+                }
+            }
+        ]
+    }
+    assert _extract_message_content(data).startswith("{")
+
+
+def test_extract_message_content_falls_back_to_reasoning():
+    from services.webapp.ai_coach import _extract_message_content
+
+    data = {
+        "choices": [
+            {"message": {"content": "", "reasoning_content": '{"summary":"r","confidence_score":1}'}}
+        ]
+    }
+    assert "summary" in _extract_message_content(data)
+
+
+def test_parse_report_json_extracts_embedded_object():
+    from services.webapp.ai_coach import _parse_report_json
+
+    raw = '這是說明\n{"summary":"ok","confidence_score":55}\n結尾'
+    report = _parse_report_json(raw)
+    assert report.summary == "ok"
+    assert report.confidence_score == 55

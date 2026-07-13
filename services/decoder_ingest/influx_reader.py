@@ -9,11 +9,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from influxdb_client.client.influxdb_client_async import InfluxDBClientAsync
 
 from .config import InfluxConfig
+
+
+def started_at_from_session_id(session_id: str) -> datetime | None:
+    """從 sess-YYYYMMDD-HHMMSS 還原場次開始時間（UTC）。
+
+    session_archive 的 _time 是歸檔／結束時間；舊資料沒有
+    session_started_at field 時靠這個 fallback。
+    """
+    if not session_id.startswith("sess-"):
+        return None
+    try:
+        return datetime.strptime(session_id[5:], "%Y%m%d-%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -83,41 +99,34 @@ class InfluxReader:
         return await client.query_api().query(flux, org=self._config.org)
 
     async def list_sessions(self, *, range_start: str = "-30d") -> list[SessionSummary]:
-        """依 session_archive 的第一/最後一筆時間推得每個場次的起訖時間，
-        依開始時間新到舊排序。
+        """結束時間＝session_archive 寫入時間；開始時間從 session_id 解析
+        （sess-YYYYMMDD-HHMMSS）。同一場歸檔點時間相同，不能用 first/last 當起訖。
         """
-        base = (
+        query = (
             f'from(bucket: "{self._config.bucket}") '
             f"|> range(start: {range_start}) "
             f'|> filter(fn: (r) => r._measurement == "{self._archive_measurement}" '
             f'and r._field == "lap_count") '
-            f'|> group(columns: ["session_id"])'
+            f'|> group(columns: ["session_id"]) '
+            f"|> first()"
         )
-        first_tables = await self._query(base + " |> first()")
-        last_tables = await self._query(base + " |> last()")
+        tables = await self._query(query)
 
-        started: dict[str, datetime] = {}
-        for table in first_tables:
+        sessions: list[SessionSummary] = []
+        for table in tables:
             for record in table.records:
                 sid = record.values.get("session_id")
-                if sid:
-                    started[sid] = record.get_time()
-
-        ended: dict[str, datetime] = {}
-        for table in last_tables:
-            for record in table.records:
-                sid = record.values.get("session_id")
-                if sid:
-                    ended[sid] = record.get_time()
-
-        sessions = [
-            SessionSummary(
-                session_id=sid,
-                started_at=started_at,
-                ended_at=ended.get(sid, started_at),
-            )
-            for sid, started_at in started.items()
-        ]
+                if not sid:
+                    continue
+                ended_at = record.get_time()
+                started_at = started_at_from_session_id(sid) or ended_at
+                sessions.append(
+                    SessionSummary(
+                        session_id=sid,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                    )
+                )
         sessions.sort(key=lambda s: s.started_at, reverse=True)
         return sessions
 
@@ -135,7 +144,9 @@ class InfluxReader:
         )
         tables = await self._query(query)
 
-        results: list[TransponderSessionResult] = []
+        # 同一 session_id+transponder 若被重複歸檔（舊 bug / 手動重跑），
+        # 只保留最新一筆，避免排行榜出現重複車號。
+        latest_by_tid: dict[str, tuple[datetime, TransponderSessionResult]] = {}
         for table in tables:
             for record in table.records:
                 values = record.values
@@ -143,32 +154,49 @@ class InfluxReader:
                     lap_history = json.loads(values.get("lap_history_json") or "[]")
                 except (TypeError, ValueError):
                     lap_history = []
-                results.append(
-                    TransponderSessionResult(
-                        transponder_id=values.get("transponder_id", ""),
-                        car_number=values.get("car_number", ""),
-                        registered=bool(values.get("registered", False)),
-                        lap_count=int(values.get("lap_count", 0)),
-                        best_lap_time=float(values.get("best_lap_time") or 0.0),
-                        last_lap_time=float(values.get("last_lap_time") or 0.0),
-                        lap_history=lap_history,
-                    )
+                tid = values.get("transponder_id", "")
+                row = TransponderSessionResult(
+                    transponder_id=tid,
+                    car_number=values.get("car_number", ""),
+                    registered=bool(values.get("registered", False)),
+                    lap_count=int(values.get("lap_count", 0)),
+                    best_lap_time=float(values.get("best_lap_time") or 0.0),
+                    last_lap_time=float(values.get("last_lap_time") or 0.0),
+                    lap_history=lap_history,
                 )
+                recorded_at = record.get_time() or datetime.min.replace(
+                    tzinfo=timezone.utc
+                )
+                prev = latest_by_tid.get(tid)
+                if prev is None or recorded_at >= prev[0]:
+                    latest_by_tid[tid] = (recorded_at, row)
 
+        results = [row for _, row in latest_by_tid.values()]
         results.sort(key=lambda r: r.best_lap_time or float("inf"))
         return results
 
     async def get_lap_history(
         self, session_id: str, transponder_id: str
     ) -> list[LapRecord]:
-        """單一場次、單一 transponder 的每一圈完整歷史（來自
-        decoder_raw_events 的逐次 passing 紀錄，不受 LapTracker 記憶體內
-        LAP_HISTORY_MAX 上限影響——歸檔後想看幾圈都看得到）。
+        """單一場次、單一 transponder 的每一圈完整歷史。
 
-        注意：transponder_id/car_number 在 decoder_raw_events 目前是
-        field 而非 tag（見 influx_writer._event_to_point），所以要先
-        pivot 成同一列再依欄位篩選，不能在 filter() 階段直接當 tag 用。
+        優先讀 decoder_raw_events；若因 UID 尾碼漂移（77/78）對不到、或
+        舊資料缺 raw，再 fallback 到 session_archive.lap_history_json。
         """
+        from .lap_tracker import normalize_transponder_id
+
+        tid = transponder_id.upper().strip()
+        canon = normalize_transponder_id(tid)
+        # 查 raw 時同時接受 canonical 與現場漂移尾碼，避免歸檔用 77、raw 用 78
+        # 導致 AI 教練/展開圈速全滅。
+        tid_candidates = {tid, canon}
+        if len(canon) >= 12 and canon[11] == "7":
+            tid_candidates.add(canon[:11] + "6")
+            tid_candidates.add(canon[:11] + "8")
+        tid_filter = " or ".join(
+            f'r.transponder_id == "{t}"' for t in sorted(tid_candidates)
+        )
+
         query = (
             f'from(bucket: "{self._config.bucket}") '
             f"|> range(start: 0) "
@@ -177,7 +205,7 @@ class InfluxReader:
             f'|> filter(fn: (r) => r._field == "last_lap_time" '
             f'or r._field == "transponder_id") '
             f'|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
-            f'|> filter(fn: (r) => r.transponder_id == "{transponder_id}") '
+            f"|> filter(fn: (r) => {tid_filter}) "
             f'|> sort(columns: ["_time"])'
         )
         tables = await self._query(query)
@@ -198,7 +226,58 @@ class InfluxReader:
                         recorded_at=row.get_time(),
                     )
                 )
-        return records
+        if records:
+            return records
+
+        # Fallback：session_archive 裡的 lap_history_json（手動歸檔 / UID
+        # 正規化後只剩 canonical tid 的情況）。
+        return await self._lap_history_from_archive(session_id, tid_candidates)
+
+    async def _lap_history_from_archive(
+        self, session_id: str, tid_candidates: set[str]
+    ) -> list[LapRecord]:
+        query = (
+            f'from(bucket: "{self._config.bucket}") '
+            f"|> range(start: 0) "
+            f'|> filter(fn: (r) => r._measurement == "{self._archive_measurement}" '
+            f'and r.session_id == "{session_id}") '
+            f'|> filter(fn: (r) => r._field == "lap_history_json") '
+            f'|> pivot(rowKey: ["_time", "transponder_id", "car_number"], '
+            f'columnKey: ["_field"], valueColumn: "_value")'
+        )
+        tables = await self._query(query)
+        best_hist: list[float] = []
+        best_time = None
+        for table in tables:
+            for record in table.records:
+                tid = (record.values.get("transponder_id") or "").upper()
+                if tid not in tid_candidates:
+                    # 也比對 normalize 後
+                    from .lap_tracker import normalize_transponder_id
+
+                    if normalize_transponder_id(tid) not in {
+                        normalize_transponder_id(t) for t in tid_candidates
+                    }:
+                        continue
+                try:
+                    hist = json.loads(record.values.get("lap_history_json") or "[]")
+                except (TypeError, ValueError):
+                    hist = []
+                if not isinstance(hist, list) or not hist:
+                    continue
+                recorded_at = record.get_time()
+                if best_time is None or (
+                    recorded_at is not None and recorded_at >= best_time
+                ):
+                    best_time = recorded_at
+                    best_hist = [float(x) for x in hist if float(x) > 0]
+        if not best_hist:
+            return []
+        base = best_time or datetime.now(timezone.utc)
+        return [
+            LapRecord(lap_number=i + 1, lap_time=t, recorded_at=base)
+            for i, t in enumerate(best_hist)
+        ]
 
     async def get_alltime_best(
         self, *, limit: int = 20, range_start: str = "-3650d"

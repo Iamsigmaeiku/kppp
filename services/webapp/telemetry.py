@@ -30,6 +30,13 @@ class TelemetrySample(BaseModel):
     accel_mag: float | None = None
     dht_temp_c: float | None = None
     dht_humidity: float | None = None
+    gps_lat: float | None = None
+    gps_lon: float | None = None
+    gps_speed_mps: float | None = None
+    gps_course_deg: float | None = None
+    gps_alt_m: float | None = None
+    gps_hdop: float | None = None
+    gps_satellites: int | None = None
     ts_ms: int | None = None
 
 
@@ -65,6 +72,13 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
         "imu_temp_c": sample.imu_temp_c,
         "dht_temp_c": sample.dht_temp_c,
         "dht_humidity": sample.dht_humidity,
+        "gps_lat": sample.gps_lat,
+        "gps_lon": sample.gps_lon,
+        "gps_speed_mps": sample.gps_speed_mps,
+        "gps_course_deg": sample.gps_course_deg,
+        "gps_alt_m": sample.gps_alt_m,
+        "gps_hdop": sample.gps_hdop,
+        "gps_satellites": sample.gps_satellites,
     }
     accel_mag = sample.accel_mag
     if accel_mag is None and sample.ax is not None and sample.ay is not None and sample.az is not None:
@@ -74,6 +88,9 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
     for key, value in fields.items():
         if value is not None:
             point = point.field(key, float(value))
+
+    if sample.gps_lat is not None and sample.gps_lon is not None:
+        point = point.tag("gps_fix", "1")
 
     if sample.ts_ms is not None:
         point = point.time(datetime.fromtimestamp(sample.ts_ms / 1000.0, tz=timezone.utc))

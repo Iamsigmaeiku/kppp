@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -19,6 +18,7 @@ from .dashboard import (
     broadcast_lap_update,
     broadcast_session_info,
     broadcast_session_reset,
+    get_reset_hook,
     get_session_started_hook,
     set_lap_tracker,
     set_reset_hook,
@@ -37,6 +37,7 @@ from .packet_parser import (
     format_raw_log_line,
 )
 from .session_manager import SessionManager
+from .session_snapshot import load_snapshot, write_snapshot
 from .tcp_client import ReconnectPolicy, TcpClient
 
 logger = logging.getLogger(__name__)
@@ -102,43 +103,21 @@ async def raw_capture_worker(
         queue.task_done()
 
 
-def write_snapshot(lap_tracker: LapTracker, path: Path) -> None:
-    """原子寫入：先寫暫存檔再 os.replace()，避免寫到一半就被讀到。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    data = lap_tracker.to_snapshot_dict()
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, path)
-
-
-def load_snapshot(lap_tracker: LapTracker, path: Path) -> None:
-    """啟動時嘗試復原崩潰前的狀態；任何失敗都只記警告，不阻擋啟動。"""
-    if not path.exists():
-        return
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning("failed to read snapshot %s: %s", path, exc)
-        return
-    lap_tracker.load_snapshot(data)
-    restored = len(data.get("states", {}))
-    logger.info("restored %d transponder(s) from snapshot %s", restored, path)
-
-
 async def snapshot_loop(
     lap_tracker: LapTracker,
+    session_manager: SessionManager,
     path: Path,
     interval_sec: float,
     *,
     stop_event: asyncio.Event,
 ) -> None:
-    """週期性把 lap_tracker 狀態寫到本地 JSON，供崩潰後快速復原。"""
+    """週期性把 lap_tracker + session_id 寫到本地 JSON，供崩潰後快速復原。"""
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
         except asyncio.TimeoutError:
             pass
-        await asyncio.to_thread(write_snapshot, lap_tracker, path)
+        await asyncio.to_thread(write_snapshot, lap_tracker, session_manager, path)
 
 
 def _append_calibration_line(path: Path, line: str) -> None:
@@ -199,11 +178,27 @@ async def handle_feed_result(
             # replay 模式餵的是歷史時間戳，閒置安全網關心的是「伺服器現在
             # 是否還在收到即時資料」，跟被重播的舊時間無關。
             session_manager.note_activity()
+            if not session_manager.numbered:
+                # 第一筆真實過線才佔「第 N 節」號，避免空 reset/重啟燒號。
+                from services.webapp import session_numbering
+
+                try:
+                    number = await session_numbering.ensure_session_numbered(
+                        session_manager.current_session_id,
+                        session_manager.session_started_at,
+                    )
+                    if number is not None:
+                        session_manager.numbered = True
+                except Exception:
+                    logger.exception(
+                        "ensure_session_numbered failed for %s",
+                        session_manager.current_session_id,
+                    )
         state = lap_tracker.record_passing(passing)
         if not state["registered"]:
             logger.info(
                 "unregistered transponder passing: %s laps=%s best=%.3fs",
-                passing.transponder_id,
+                state["transponder_id"],
                 state["lap_count"],
                 state["best_lap_time"] or 0.0,
             )
@@ -216,12 +211,16 @@ async def handle_feed_result(
         # decoder_id 隨事件帶入（見多 decoder 架構），讓每個 decoder 各自的
         # 來源在 Influx 裡可分辨；session_id 隨事件帶入（見 SessionManager），
         # 讓同一場次的每一圈可用 session_id 篩選出來重建完整歷史。
+        # transponder_id 用 canonical（lap_tracker 已正規化 77/78），避免同一
+        # 台車在 Influx 被拆成兩個 series。
         passing_fields: dict[str, str | int | float | bool] = {
-            "transponder_id": passing.transponder_id,
+            "transponder_id": state["transponder_id"],
             "car_number": state["car_number"],
+            "registered": state["registered"],
             "lap_count": state["lap_count"],
             "last_lap_time": state["last_lap_time"] or 0.0,
             "best_lap_time": state["best_lap_time"] or 0.0,
+            "decoder_id": decoder_id,
         }
         if session_id is not None:
             passing_fields["session_id"] = session_id
@@ -230,10 +229,7 @@ async def handle_feed_result(
                 timestamp=passing.received_at,
                 event_type="passing",
                 raw=bytes.fromhex(passing.raw_payload),
-                fields={
-                    **passing_fields,
-                    "decoder_id": decoder_id,
-                },
+                fields=passing_fields,
             )
         )
 
@@ -267,11 +263,14 @@ async def lap_timer_broadcast_loop(
     session_manager: SessionManager | None = None,
     writer: InfluxWriter | None = None,
     auto_archive_idle_sec: float | None = None,
+    auto_archive_all_frozen_sec: float | None = None,
 ) -> None:
-    """每秒推送本圈計時；逾時或 decoder 斷線時凍結。若提供
-    session_manager/writer/auto_archive_idle_sec，閒置超過門檻且目前還有
-    未歸檔的資料時，觸發安全網式自動歸檔+重置（見 session_manager.py
-    模組說明——這不是「新一節開始」的偵測，只是避免忘記按重置）。
+    """每秒推送本圈計時；逾時或 decoder 斷線時凍結。
+
+    自動歸檔觸發（有可歸檔成績時）：
+    1. 完全閒置 >= AUTO_ARCHIVE_IDLE_SEC（安全網）
+    2. 全車本圈已暫停 且 閒置 >= AUTO_ARCHIVE_ALL_FROZEN_SEC
+       （場次實質結束：車都停了不必再等半小時才進第七節）
     """
     while not stop_event.is_set():
         states = lap_tracker.all_states()
@@ -282,17 +281,58 @@ async def lap_timer_broadcast_loop(
         if (
             session_manager is not None
             and writer is not None
-            and auto_archive_idle_sec is not None
-            and states
-            and session_manager.idle_seconds() >= auto_archive_idle_sec
+            and lap_tracker.has_archivable_results()
         ):
-            await session_manager.archive_and_reset(
-                lap_tracker, writer, trigger="auto_idle"
-            )
-            await _on_new_session_started(session_manager)
-            await broadcast_session_reset(
-                reset_at=datetime.now(timezone.utc).isoformat()
-            )
+            idle = session_manager.idle_seconds()
+            should_archive = False
+            trigger_reason = ""
+            if (
+                auto_archive_idle_sec is not None
+                and idle >= auto_archive_idle_sec
+            ):
+                should_archive = True
+                trigger_reason = "auto_idle"
+            elif (
+                auto_archive_all_frozen_sec is not None
+                and idle >= auto_archive_all_frozen_sec
+                and lap_tracker.all_timers_inactive()
+            ):
+                should_archive = True
+                trigger_reason = "auto_idle"  # 沿用既有 trigger 字面；語意仍是安全網
+
+            if should_archive:
+                logger.info(
+                    "auto-archive: reason=%s idle=%.0fs session_id=%s cars=%d",
+                    trigger_reason,
+                    idle,
+                    session_manager.current_session_id,
+                    len(states),
+                )
+                archived_id = session_manager.current_session_id
+                archived_started = session_manager.session_started_at
+                await session_manager.archive_and_reset(
+                    lap_tracker, writer, trigger="auto_idle"
+                )
+                # 歸檔當下再補一次編號：避免第一筆過線時 numbering 失敗，
+                # 場次紀錄只顯示裸 sess-… 而不是「第 N 節」。
+                try:
+                    from services.webapp import session_numbering
+
+                    await session_numbering.ensure_session_numbered(
+                        archived_id, archived_started
+                    )
+                except Exception:
+                    logger.exception(
+                        "ensure_session_numbered on archive failed for %s",
+                        archived_id,
+                    )
+                on_reset = get_reset_hook()
+                if on_reset is not None:
+                    on_reset()
+                await _on_new_session_started(session_manager)
+                await broadcast_session_reset(
+                    reset_at=datetime.now(timezone.utc).isoformat()
+                )
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=1.0)
@@ -553,8 +593,14 @@ async def run_service(
         decoder_ids=[endpoint.decoder_id for endpoint in config.decoders],
         decoder_tick_hz=config.lap.decoder_tick_hz,
     )
-    load_snapshot(lap_tracker, config.snapshot_path)
-    session_manager = SessionManager.start_new()
+    restored = load_snapshot(lap_tracker, config.snapshot_path)
+    if restored is not None:
+        session_manager = restored.session_manager
+    else:
+        # orphan / 無 snapshot：發新 session_id，並立刻覆寫磁碟上可能殘留
+        # 的無 session_id 舊檔，避免下次啟動又警告一次。
+        session_manager = SessionManager.start_new()
+        write_snapshot(lap_tracker, session_manager, config.snapshot_path)
     writer = InfluxWriter(
         InfluxWriterConfig(
             url=config.influx.url,
@@ -568,9 +614,13 @@ async def run_service(
         ),
         dry_run=dry_run,
     )
+    # snapshot 持久化與 dashboard 無關：auto_idle / 手動 reset 都靠這個 hook
+    # 在清空記憶體後立刻寫出「新 session_id + 空 states」。
+    set_reset_hook(
+        lambda: write_snapshot(lap_tracker, session_manager, config.snapshot_path)
+    )
     if with_dashboard:
         set_lap_tracker(lap_tracker)
-        set_reset_hook(lambda: write_snapshot(lap_tracker, config.snapshot_path))
         set_session_manager(session_manager, writer)
 
     stop_event = asyncio.Event()
@@ -592,6 +642,7 @@ async def run_service(
         asyncio.create_task(
             snapshot_loop(
                 lap_tracker,
+                session_manager,
                 config.snapshot_path,
                 config.snapshot_interval_sec,
                 stop_event=stop_event,
@@ -634,6 +685,7 @@ async def run_service(
                     session_manager=session_manager,
                     writer=writer,
                     auto_archive_idle_sec=config.auto_archive_idle_sec,
+                    auto_archive_all_frozen_sec=config.auto_archive_all_frozen_sec,
                 ),
                 name="lap-timer-broadcast",
             )

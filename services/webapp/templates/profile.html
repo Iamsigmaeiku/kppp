@@ -4,19 +4,121 @@
 {% block heading %}我的資料{% endblock %}
 
 {% block content %}
-<div class="panel" x-data='{ avatarUrl: {{ (avatar_url or "") | tojson }} }'>
-  <div style="padding:1.25rem; display:flex; align-items:center; gap:1.25rem; flex-wrap:wrap;">
+{# 綁定教學 modal：首次進 profile 顯示，按 OK 才關 #}
+<div
+  class="tutorial-overlay"
+  x-data="{
+    open: false,
+    step: 0,
+    init() {
+      try { if (!localStorage.getItem('kpp_binding_tutorial_seen')) this.open = true; } catch (e) { this.open = true; }
+    },
+    dismiss() {
+      try { localStorage.setItem('kpp_binding_tutorial_seen', '1'); } catch (e) {}
+      this.open = false;
+    }
+  }"
+  x-show="open"
+  x-cloak
+  @keydown.escape.window="dismiss()"
+>
+  <div class="tutorial-backdrop" @click="dismiss()"></div>
+  <div class="tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
+    <h2 id="tutorial-title">如何綁定節次與車號</h2>
+    <div class="tutorial-steps">
+      <div class="tutorial-step" :class="{ active: step === 0 }" @click="step = 0">
+        <div class="tutorial-step-num">1</div>
+        <div class="tutorial-step-body">
+          <strong>確認本節車號</strong>
+          <p>到「即時面板」看你被配到的車號（例如 17）。每節車號可能不同。</p>
+        </div>
+      </div>
+      <div class="tutorial-step" :class="{ active: step === 1 }" @click="step = 1">
+        <div class="tutorial-step-num">2</div>
+        <div class="tutorial-step-body">
+          <strong>輸入車號並綁定</strong>
+          <p>在本頁下方填入車號；場次編號留空＝目前這節。按「綁定」。</p>
+        </div>
+      </div>
+      <div class="tutorial-step" :class="{ active: step === 2 }" @click="step = 2">
+        <div class="tutorial-step-num">3</div>
+        <div class="tutorial-step-body">
+          <strong>每節都要重新綁</strong>
+          <p>換節後綁定不會自動沿用。沒綁定就不會顯示你的名字／AI 報告。</p>
+        </div>
+      </div>
+    </div>
+    <div class="tutorial-anim" aria-hidden="true">
+      <div class="tutorial-anim-track">
+        <span class="tutorial-chip">節次</span>
+        <span class="tutorial-arrow">→</span>
+        <span class="tutorial-chip accent">車號</span>
+        <span class="tutorial-arrow">→</span>
+        <span class="tutorial-chip ok">綁定完成</span>
+      </div>
+    </div>
+    <button type="button" class="btn btn-primary tutorial-ok" @click="dismiss()">OK，我知道了</button>
+  </div>
+</div>
+
+{% if needs_bind %}
+<div class="banner-warn">
+  <strong>本節尚未綁定車號</strong>
+  — 上一節的綁定不會自動沿用。請在下方重新綁定後，排行榜才會顯示你的名稱與頭像。
+  <a href="#bind-form">立刻綁定 →</a>
+</div>
+{% endif %}
+
+<div class="panel profile-hero" x-data='{
+  avatarUrl: {{ (avatar_url or "") | tojson }},
+  nickname: {{ (user.nickname or "") | tojson }},
+  displayName: {{ display_name | tojson }},
+  editing: false,
+  status: null,
+  async saveNickname() {
+    this.status = null;
+    try {
+      const r = await fetch("/api/profile/nickname", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ nickname: this.nickname })
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "儲存失敗");
+      this.displayName = d.display_name;
+      this.nickname = d.nickname || "";
+      this.editing = false;
+      this.status = "已儲存";
+    } catch (e) {
+      this.status = e.message || String(e);
+    }
+  }
+}'>
+  <div class="profile-hero-inner">
     <template x-if="avatarUrl">
-      <img :src="avatarUrl" style="width:4rem;height:4rem;border-radius:50%;object-fit:cover;background:var(--panel-alt);border:2px solid var(--border);" />
+      <img :src="avatarUrl" class="profile-avatar" alt="" />
     </template>
     <template x-if="!avatarUrl">
-      <span class="avatar-fallback" style="width:4rem;height:4rem;font-size:1.5rem;border:2px solid var(--border);">{{ (user.display_name or user.email or "?").strip()[0] | upper }}</span>
+      <span class="avatar-fallback profile-avatar">{{ display_name[0] | upper }}</span>
     </template>
-    <div>
-      <div style="font-weight:700; font-size:1.1rem;">{{ user.display_name or user.email }}</div>
-      <div style="color:var(--text-dim); font-size:0.85rem;">{{ user.email }}</div>
+    <div class="profile-meta">
+      <template x-if="!editing">
+        <div>
+          <div class="profile-name" x-text="displayName"></div>
+          <div class="profile-email">{{ user.email }}</div>
+          <button type="button" class="btn btn-link" @click="editing = true">改暱稱</button>
+        </div>
+      </template>
+      <template x-if="editing">
+        <div class="nickname-edit">
+          <input type="text" maxlength="32" placeholder="輸入暱稱（留空則用 Google 名稱）" x-model="nickname" />
+          <button type="button" class="btn btn-primary" @click="saveNickname()">儲存</button>
+          <button type="button" @click="editing = false">取消</button>
+        </div>
+      </template>
+      <span x-show="status" x-text="status" class="profile-status"></span>
     </div>
-    <div style="margin-left:auto;">
+    <div class="profile-actions">
       <label class="btn" style="cursor:pointer;">
         上傳頭像
         <input type="file" accept="image/png,image/jpeg,image/webp" style="display:none;"
@@ -38,24 +140,79 @@
   </div>
 </div>
 
-<div class="panel">
-  <div class="panel-header">我的車號綁定</div>
+{% macro binding_rows(bindings, empty_msg) %}
   {% if not bindings %}
-  <div class="empty-state">尚未綁定任何場次的車號。到即時面板頁面確認自己被配到的車號後，用下方表單綁定。</div>
-  {% endif %}
+  <div class="empty-state">{{ empty_msg }}</div>
+  {% else %}
   <div class="table-wrap">
-    <table>
+    <table class="profile-bindings">
       <thead>
-        <tr><th>場次</th><th>車號</th><th>綁定時間</th><th></th></tr>
+        <tr><th>場次</th><th>車號</th><th>綁定時間</th><th>AI 教練</th></tr>
       </thead>
-      <tbody>
-        {% for b in bindings %}
-        {% set key = b.session_id ~ "::" ~ b.transponder_id %}
-        <tr x-data='{
-              report: {{ (reports_by_key.get(key) if reports_by_key.get(key) else none) | tojson }},
-              loading: false,
-              error: null,
-            }'>
+      {% for b in bindings %}
+      {% set key = b.session_id ~ "::" ~ b.transponder_id %}
+      {% set pre = reports_by_key.get(key) %}
+      <tbody x-data='{
+            status: {{ (pre.status if pre else "none") | tojson }},
+            report: {{ (pre.report if pre and pre.report else none) | tojson }},
+            error: {{ (pre.error_message if pre else none) | tojson }},
+            expanded: false,
+            pollTimer: null,
+            async generate() {
+              this.error = null;
+              this.status = "pending";
+              try {
+                const r = await fetch("/api/ai-coach/reports", {
+                  method: "POST",
+                  headers: {"Content-Type": "application/json"},
+                  body: JSON.stringify({
+                    session_id: {{ b.session_id | tojson }},
+                    transponder_id: {{ b.transponder_id | tojson }}
+                  })
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok && r.status !== 202) {
+                  const detail = d.detail;
+                  throw new Error(
+                    typeof detail === "string" ? detail
+                      : Array.isArray(detail) ? detail.map(x => x.msg || JSON.stringify(x)).join("; ")
+                      : (detail && detail.message) || ("產生報告失敗 (" + r.status + ")")
+                  );
+                }
+                this.status = d.status || "pending";
+                if (d.report) this.report = d.report;
+                if (d.error_message) this.error = d.error_message;
+                if (this.status === "pending" || this.status === "running") this.startPoll();
+              } catch (e) {
+                this.status = "failed";
+                this.error = e.message || String(e);
+              }
+            },
+            startPoll() {
+              if (this.pollTimer) return;
+              this.pollTimer = setInterval(() => this.poll(), 2500);
+            },
+            async poll() {
+              try {
+                const u = new URL("/api/ai-coach/reports/status", location.origin);
+                u.searchParams.set("session_id", {{ b.session_id | tojson }});
+                u.searchParams.set("transponder_id", {{ b.transponder_id | tojson }});
+                const r = await fetch(u);
+                const d = await r.json();
+                this.status = d.status || "none";
+                if (d.report) this.report = d.report;
+                if (d.error_message) this.error = d.error_message;
+                if (this.status === "done" || this.status === "failed" || this.status === "none") {
+                  clearInterval(this.pollTimer);
+                  this.pollTimer = null;
+                }
+              } catch (e) {}
+            },
+            init() {
+              if (this.status === "pending" || this.status === "running") this.startPoll();
+            }
+          }'>
+        <tr>
           <td class="tid">
             <a href="/sessions/{{ b.session_id }}">
               {% if b.session and b.session.session_number %}
@@ -69,86 +226,103 @@
           <td>{{ b.bound_at | localtime }}</td>
           <td>
             <button
-              :disabled="loading"
-              @click="
-                loading = true; error = null;
-                fetch('/api/ai-coach/reports', {
-                  method: 'POST',
-                  headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({session_id: '{{ b.session_id }}', transponder_id: '{{ b.transponder_id }}'})
-                })
-                  .then(async (r) => {
-                    if (!r.ok) { const d = await r.json(); throw new Error(d.detail || '產生報告失敗'); }
-                    return r.json();
-                  })
-                  .then(d => { report = d; loading = false; })
-                  .catch(e => { error = e.message; loading = false; });
-              "
-              x-text="loading ? '產生中…' : (report ? '重新產生 AI 教練報告' : '產生 AI 教練報告')"
+              :disabled="status === 'pending' || status === 'running'"
+              @click="generate()"
+              x-text="(status === 'pending' || status === 'running') ? '產生中…可離開此頁' : (report ? '重新產生 AI 教練報告' : '產生 AI 教練報告')"
             ></button>
           </td>
         </tr>
-        <tr x-show="report || error">
-          <td colspan="4">
-            <template x-if="error">
-              <div style="color:var(--err);" x-text="error"></div>
+        <tr x-show="report || error || status === 'pending' || status === 'running'" x-cloak>
+          <td colspan="4" class="ai-report-cell">
+            <template x-if="status === 'pending' || status === 'running'">
+              <div class="ai-pending">AI 教練報告產生中…你可以去看其他頁面，回來後會自動更新。</div>
+            </template>
+            <template x-if="error && status === 'failed'">
+              <div class="ai-error" x-text="error"></div>
             </template>
             <template x-if="report">
-              <div>
-                <p x-text="report.summary"></p>
-                <div style="display:flex; gap:2rem; flex-wrap:wrap;">
-                  <div>
-                    <b style="color:var(--ok);">做得不錯</b>
-                    <ul><template x-for="s in report.strengths"><li x-text="s"></li></template></ul>
+              <details class="ai-report" :open="expanded">
+                <summary @click.prevent="expanded = !expanded">
+                  <span class="ai-summary-preview" x-text="report.summary"></span>
+                  <span class="ai-toggle" x-text="expanded ? '收合' : '展開全文'"></span>
+                </summary>
+                <div class="ai-report-body" x-show="expanded">
+                  <p x-text="report.summary"></p>
+                  <div class="ai-cols">
+                    <div>
+                      <b style="color:var(--ok);">做得不錯</b>
+                      <ul><template x-for="s in (report.strengths || [])"><li x-text="s"></li></template></ul>
+                    </div>
+                    <div>
+                      <b style="color:var(--warn);">還可以進步</b>
+                      <ul><template x-for="w in (report.weaknesses || [])"><li x-text="w"></li></template></ul>
+                    </div>
+                    <div>
+                      <b style="color:var(--accent);">下次目標</b>
+                      <ul><template x-for="g in (report.next_run_goals || [])"><li x-text="g"></li></template></ul>
+                    </div>
                   </div>
-                  <div>
-                    <b style="color:var(--warn);">還可以進步</b>
-                    <ul><template x-for="w in report.weaknesses"><li x-text="w"></li></template></ul>
-                  </div>
-                  <div>
-                    <b style="color:var(--accent);">下次目標</b>
-                    <ul><template x-for="g in report.next_run_goals"><li x-text="g"></li></template></ul>
-                  </div>
+                  <template x-if="report.lap_observations && report.lap_observations.length">
+                    <div class="ai-laps">
+                      <b style="color:var(--text-dim);">逐圈觀察</b>
+                      <ul>
+                        <template x-for="obs in report.lap_observations" :key="obs.lap_number">
+                          <li>
+                            <b x-text="'第 ' + obs.lap_number + ' 圈'"></b>
+                            （<span x-text="Number(obs.lap_time).toFixed(3)"></span>s）—
+                            <span x-text="obs.note"></span>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                  <p class="ai-confidence">
+                    信心分數：<span x-text="report.confidence_score"></span>/100
+                  </p>
                 </div>
-                <template x-if="report.lap_observations && report.lap_observations.length">
-                  <div style="margin-top:0.75rem;">
-                    <b style="color:var(--text-dim);">逐圈觀察</b>
-                    <ul>
-                      <template x-for="obs in report.lap_observations" :key="obs.lap_number">
-                        <li><b x-text="'第 ' + obs.lap_number + ' 圈'"></b>（<span x-text="obs.lap_time.toFixed(3)"></span>s）— <span x-text="obs.note"></span></li>
-                      </template>
-                    </ul>
-                  </div>
-                </template>
-                <p style="color:var(--text-faint); font-size:0.8rem;">信心分數：<span x-text="report.confidence_score"></span>/100</p>
-              </div>
+              </details>
             </template>
           </td>
         </tr>
-        {% endfor %}
       </tbody>
+      {% endfor %}
     </table>
   </div>
-</div>
+  {% endif %}
+{% endmacro %}
 
 <div class="panel">
-  <div class="panel-header">綁定新的車號</div>
-  <div style="padding:1rem;" x-data="{ carNumber: '', sessionNumber: '', status: null }">
-    <input type="text" placeholder="輸入你被配到的車號（見即時面板的「車號」欄）" x-model="carNumber"
-      style="padding:0.5rem 0.75rem; border-radius:8px; border:1px solid var(--border); background:var(--panel-alt); color:var(--text); margin-right:0.5rem;" />
-    <input type="number" min="1" max="100" placeholder="場次編號（留空＝目前這節，例如 12）" x-model="sessionNumber"
-      style="padding:0.5rem 0.75rem; border-radius:8px; border:1px solid var(--border); background:var(--panel-alt); color:var(--text); margin-right:0.5rem; width:12rem;" />
-    <button @click="
+  <div class="panel-header">本節綁定{% if current_session_id %} · {{ current_session_id }}{% endif %}</div>
+  {{ binding_rows(current_bindings, "本節尚未綁定。請用下方表單綁定——上一節的車號不會自動帶過來。") }}
+</div>
+
+<div class="panel" id="bind-form">
+  <div class="panel-header">綁定本節車號</div>
+  <div class="bind-form" x-data="{ carNumber: '', sessionNumber: '', status: null }">
+    <label class="bind-field">
+      <span>車號</span>
+      <input type="text" placeholder="見即時面板的「車號」欄" x-model="carNumber" />
+    </label>
+    <label class="bind-field">
+      <span>場次編號（選填）</span>
+      <input type="number" min="1" max="100" placeholder="留空＝目前這節" x-model="sessionNumber" />
+    </label>
+    <button class="btn btn-primary bind-submit" @click="
       fetch('/api/bindings', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({car_number: carNumber, session_number: sessionNumber ? parseInt(sessionNumber, 10) : null})
       })
-        .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.detail); return d; })
+        .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail)); return d; })
         .then(() => location.reload())
         .catch(e => status = e.message);
     ">綁定</button>
-    <span x-show="status" x-text="status" style="color:var(--err); margin-left:0.5rem;"></span>
+    <span x-show="status" x-text="status" class="bind-error"></span>
   </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header">歷史綁定</div>
+  {{ binding_rows(history_bindings, "尚無歷史綁定。") }}
 </div>
 {% endblock %}

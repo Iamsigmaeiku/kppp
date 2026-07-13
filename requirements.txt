@@ -2,6 +2,7 @@ influxdb-client[async]>=1.40
 fastapi>=0.110
 uvicorn[standard]>=0.27
 python-dotenv>=1.0
+numpy>=1.24
 
 # Auth / DB / templates (Phase 2-3)
 sqlalchemy>=2.0

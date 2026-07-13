@@ -1,0 +1,32 @@
+[
+  {
+    "corner_id": 1,
+    "type": "apex",
+    "px": 924.9,
+    "py": 247.8,
+    "local_x_m": 39.22,
+    "local_y_m": 54.0,
+    "lat": 22.74279,
+    "lng": 120.3221152
+  },
+  {
+    "corner_id": 1,
+    "type": "curb_start",
+    "px": 912.0,
+    "py": 223.5,
+    "local_x_m": 37.45,
+    "local_y_m": 57.35,
+    "lat": 22.74282,
+    "lng": 120.322098
+  },
+  {
+    "corner_id": 1,
+    "type": "curb_end",
+    "px": 879.1,
+    "py": 207.8,
+    "local_x_m": 32.93,
+    "local_y_m": 59.51,
+    "lat": 22.7428395,
+    "lng": 120.3220539
+  }
+]

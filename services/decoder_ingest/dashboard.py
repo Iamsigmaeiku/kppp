@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 
 app = FastAPI(title="TKS Dashboard")
 connected_clients: set[WebSocket] = set()
@@ -51,6 +51,10 @@ def set_reset_hook(callback) -> None:
     _on_reset = callback
 
 
+def get_reset_hook():
+    return _on_reset
+
+
 def set_session_started_hook(callback) -> None:
     """註冊一個「新場次開始」的 async callback（簽名
     `callback(session_id: str, started_at: datetime) -> Awaitable[None]`），
@@ -68,9 +72,51 @@ def get_session_started_hook():
 
 
 @app.post("/api/session/reset")
-async def reset_session() -> dict:
-    # 公開即時面板不提供重置；避免現場觀眾/一般登入使用者誤觸清空賽段。
-    raise HTTPException(status_code=403, detail="session reset disabled for public users")
+async def reset_session(request: Request) -> dict:
+    """場次結束：歸檔後清空。需 Header `X-Session-Reset-Token` 對上
+    環境變數 `SESSION_RESET_TOKEN`（未設定 token 則維持禁用）。
+    """
+    import os
+
+    expected = (os.getenv("SESSION_RESET_TOKEN") or "").strip()
+    provided = (request.headers.get("X-Session-Reset-Token") or "").strip()
+    if not expected or provided != expected:
+        raise HTTPException(
+            status_code=403, detail="session reset disabled for public users"
+        )
+    if _session_manager is None or _influx_writer is None or _lap_tracker is None:
+        raise HTTPException(status_code=503, detail="session manager not ready")
+
+    archived = _session_manager.current_session_id
+    archived_started = _session_manager.session_started_at
+    new_session_id = await _session_manager.archive_and_reset(
+        _lap_tracker, _influx_writer, trigger="manual"
+    )
+    # 手動收場同樣補編號，避免列表出現沒有「第 N 節」的裸 session_id
+    if _on_session_started is not None:
+        try:
+            from services.webapp import session_numbering
+
+            await session_numbering.ensure_session_numbered(
+                archived, archived_started
+            )
+        except Exception:
+            pass
+    if _on_reset is not None:
+        _on_reset()
+    reset_at = datetime.now(timezone.utc).isoformat()
+    await broadcast_session_reset(reset_at=reset_at)
+    await broadcast_session_info(session_id=new_session_id)
+    if _on_session_started is not None:
+        await _on_session_started(
+            new_session_id, _session_manager.session_started_at
+        )
+    return {
+        "ok": True,
+        "archived_session_id": archived,
+        "new_session_id": new_session_id,
+        "reset_at": reset_at,
+    }
 
 
 @app.websocket("/ws/laps")

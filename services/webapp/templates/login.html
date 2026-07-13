@@ -17,6 +17,9 @@
     <p style="color:var(--text-dim); margin-bottom:1.5rem;">
       進入網站前必須登入。登入後才能使用即時面板、排行榜、場次紀錄與遙測數據。
     </p>
+    {% if error_message %}
+    <p style="color:var(--err); margin-bottom:1.25rem;">{{ error_message }}</p>
+    {% endif %}
     {% if google_enabled %}
     <a class="btn btn-primary" href="/api/auth/google/login?next={{ next | urlencode }}" style="font-size:1rem;padding:0.7rem 1.5rem;">
       使用 Google 帳號登入

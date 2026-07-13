@@ -1,0 +1,4 @@
+# Attitude EKF microservice — also covered by repo-root requirements.txt
+influxdb-client>=1.38
+numpy>=1.24
+python-dotenv>=1.0

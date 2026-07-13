@@ -1,12 +1,13 @@
-/**
- * ESP32-WROOM-32 + ICM-42688-P (I2C) + DHT11 → HTTP ingest
+    /**
+ * ESP32-WROOM-32 + ICM-42688-P (I2C) + DHT11 + NEO-6M GPS (UART1) → HTTP ingest
  *
  * Pins (per project wiring):
  *   ICM42688: 3V3, GND, SDA=GPIO21, SCL=GPIO22
  *   DHT11:    VCC, GND, DATA=GPIO15
+ *   NEO-6M:   VCC(3V3/5V per module), GND, TXD→GPIO16(UART1 RX), RXD→GPIO17(UART1 TX)
  *
- * Offline: RAM ring；NTP 非阻塞；IMU 採樣在 core1，HTTP 在 loop（core0），
- * 避免 HTTPS 卡住時丟 25Hz 資料。
+ * Offline: RAM ring；NTP 非阻塞；IMU+GPS 採樣在 core1，HTTP 在 loop（core0），
+ * 避免 HTTPS 卡住時丟 25Hz 資料或吃滿 GPS UART buffer。
  */
 
 #include <Arduino.h>
@@ -16,6 +17,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
+#include <TinyGPSPlus.h>
 #include <math.h>
 #include <string.h>
 #include <sys/time.h>
@@ -31,6 +33,10 @@
 static constexpr int PIN_SDA = 21;
 static constexpr int PIN_SCL = 22;
 static constexpr int PIN_DHT = 15;
+static constexpr int PIN_GPS_RX = 16;  // ESP32 RX ← NEO-6M TXD
+static constexpr int PIN_GPS_TX = 17;  // ESP32 TX → NEO-6M RXD
+static constexpr uint32_t GPS_BAUD = 9600;
+static constexpr uint32_t GPS_FIX_STALE_MS = 5000;  // 超過視為沒訊號，不隨包送出
 
 // ---- ICM-42688-P (Bank 0) ----
 static constexpr uint8_t ICM_ADDR_LOW = 0x68;
@@ -52,17 +58,71 @@ static constexpr uint32_t DHT_PERIOD_MS = 2000;
 static constexpr uint32_t NTP_RESYNC_MS = 3600000;
 static constexpr uint32_t NTP_RETRY_MS = 15000;
 static constexpr size_t POST_CHUNK = 50;
-static constexpr size_t RING_CAP = 1500;            // ~60s @25Hz
+static constexpr size_t RING_CAP = 900;             // ~36s @25Hz（Sample 加 GPS 欄位變大，縮小筆數維持原本 DRAM 用量）
 
 static DHT dht(PIN_DHT, DHT11);
 static uint8_t icmAddr = ICM_ADDR_LOW;
+
+static HardwareSerial gpsSerial(1);  // UART1，腳位在 setup() 用 begin() remap 到 16/17
+static TinyGPSPlus gps;
 
 struct Sample {
   float ax, ay, az, gx, gy, gz, imu_temp_c, accel_mag;
   float dht_temp_c, dht_humidity;
   bool has_dht;
+  float gps_lat, gps_lon, gps_speed_mps, gps_course_deg, gps_alt_m, gps_hdop;
+  uint32_t gps_satellites;
+  bool has_gps;
   uint32_t millis_at;
 };
+
+struct GpsFix {
+  float lat, lon, speed_mps, course_deg, alt_m, hdop;
+  uint32_t satellites;
+  uint32_t updated_at_ms;
+  bool valid;
+};
+
+static volatile GpsFix gpsFix{};
+static portMUX_TYPE gpsMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t gpsSentenceCount = 0;
+
+static void gpsPoll() {
+  while (gpsSerial.available()) {
+    if (gps.encode(gpsSerial.read())) {
+      gpsSentenceCount++;
+      if (gps.location.isValid() && gps.location.age() < GPS_FIX_STALE_MS) {
+        portENTER_CRITICAL(&gpsMux);
+        gpsFix.lat = (float)gps.location.lat();
+        gpsFix.lon = (float)gps.location.lng();
+        gpsFix.speed_mps = gps.speed.isValid() ? (float)gps.speed.mps() : NAN;
+        gpsFix.course_deg = gps.course.isValid() ? (float)gps.course.deg() : NAN;
+        gpsFix.alt_m = gps.altitude.isValid() ? (float)gps.altitude.meters() : NAN;
+        gpsFix.hdop = gps.hdop.isValid() ? (float)gps.hdop.hdop() : NAN;
+        gpsFix.satellites = gps.satellites.isValid() ? (uint32_t)gps.satellites.value() : 0;
+        gpsFix.updated_at_ms = millis();
+        gpsFix.valid = true;
+        portEXIT_CRITICAL(&gpsMux);
+      }
+    }
+  }
+}
+
+static bool gpsSnapshot(GpsFix &out) {
+  portENTER_CRITICAL(&gpsMux);
+  out.lat = gpsFix.lat;
+  out.lon = gpsFix.lon;
+  out.speed_mps = gpsFix.speed_mps;
+  out.course_deg = gpsFix.course_deg;
+  out.alt_m = gpsFix.alt_m;
+  out.hdop = gpsFix.hdop;
+  out.satellites = gpsFix.satellites;
+  out.updated_at_ms = gpsFix.updated_at_ms;
+  out.valid = gpsFix.valid;
+  portEXIT_CRITICAL(&gpsMux);
+  if (!out.valid) return false;
+  return (millis() - out.updated_at_ms) < GPS_FIX_STALE_MS;
+}
 
 static Sample ring[RING_CAP];
 static size_t ringHead = 0;
@@ -341,6 +401,18 @@ static bool icmReadSample(Sample &out) {
   out.has_dht = dhtOk;
   out.dht_temp_c = lastDhtTemp;
   out.dht_humidity = lastDhtHum;
+
+  GpsFix fix{};
+  out.has_gps = gpsSnapshot(fix);
+  if (out.has_gps) {
+    out.gps_lat = fix.lat;
+    out.gps_lon = fix.lon;
+    out.gps_speed_mps = fix.speed_mps;
+    out.gps_course_deg = fix.course_deg;
+    out.gps_alt_m = fix.alt_m;
+    out.gps_hdop = fix.hdop;
+    out.gps_satellites = fix.satellites;
+  }
   return true;
 }
 
@@ -352,6 +424,8 @@ static void sampleTask(void *) {
 
   for (;;) {
     uint32_t now = millis();
+
+    gpsPoll();
 
     if (now - lastImu >= IMU_PERIOD_MS) {
       lastImu = now;
@@ -484,6 +558,15 @@ static bool postBatch() {
       o["dht_temp_c"] = s.dht_temp_c;
       o["dht_humidity"] = s.dht_humidity;
     }
+    if (s.has_gps) {
+      o["gps_lat"] = s.gps_lat;
+      o["gps_lon"] = s.gps_lon;
+      if (!isnan(s.gps_speed_mps)) o["gps_speed_mps"] = s.gps_speed_mps;
+      if (!isnan(s.gps_course_deg)) o["gps_course_deg"] = s.gps_course_deg;
+      if (!isnan(s.gps_alt_m)) o["gps_alt_m"] = s.gps_alt_m;
+      if (!isnan(s.gps_hdop)) o["gps_hdop"] = s.gps_hdop;
+      o["gps_satellites"] = s.gps_satellites;
+    }
   }
 
   String body;
@@ -534,6 +617,10 @@ void setup() {
 
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);
+
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+  Serial.printf("[gps] UART1 @ %lu baud, rx=%d tx=%d\n",
+                (unsigned long)GPS_BAUD, PIN_GPS_RX, PIN_GPS_TX);
 
   dht.begin();
   delay(1000);
@@ -590,10 +677,15 @@ void loop() {
     const uint32_t failDelta = fail - lastImuFail;
     lastImuOk = ok;
     lastImuFail = fail;
-    Serial.printf("[stat] dht=%.1f/%.1f ring=%u imu_ok=%lu/2s fail=%lu ntp=%d\n",
+    GpsFix fix{};
+    bool gpsOk = gpsSnapshot(fix);
+    Serial.printf("[stat] dht=%.1f/%.1f ring=%u imu_ok=%lu/2s fail=%lu ntp=%d "
+                  "gps=%d sats=%lu hdop=%.1f sentences=%lu\n",
                   t, h, (unsigned)ringSize(),
                   (unsigned long)okDelta, (unsigned long)failDelta,
-                  timeOk ? 1 : 0);
+                  timeOk ? 1 : 0, gpsOk ? 1 : 0,
+                  (unsigned long)fix.satellites, fix.hdop,
+                  (unsigned long)gpsSentenceCount);
   }
 
   const size_t pending = ringSize();

@@ -105,6 +105,6 @@ def load_web_config() -> WebAppConfig:
         grafana_embed_url=_env(
             "GRAFANA_EMBED_URL",
             "http://localhost:3000/grafana/d/kart-telemetry/karting"
-            "?orgId=1&kiosk&theme=dark&refresh=2s",
+            "?orgId=1&kiosk=tv&theme=dark&refresh=2s",
         ),
     )

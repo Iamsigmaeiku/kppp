@@ -48,7 +48,8 @@ def _make_tracker_with_data() -> LapTracker:
 async def test_archive_and_reset_archives_before_clearing():
     tracker = _make_tracker_with_data()
     writer = _RecordingWriter(tracker)
-    manager = SessionManager.start_new(at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    manager = SessionManager.start_new(at=started)
     old_session_id = manager.current_session_id
 
     new_session_id = await manager.archive_and_reset(tracker, writer, trigger="manual")
@@ -60,6 +61,29 @@ async def test_archive_and_reset_archives_before_clearing():
     assert tracker.all_states() == []
     assert new_session_id != old_session_id
     assert manager.current_session_id == new_session_id
+
+    # 歸檔 point 必須帶 session_started_at，否則 list_sessions 起訖會撞在一起
+    assert writer.written_points
+    point_dict = writer.written_points[0].to_line_protocol()
+    assert f"session_started_at={started.timestamp()}" in point_dict or (
+        "session_started_at=" in point_dict
+    )
+
+async def test_archive_and_reset_skips_zero_lap_noise():
+    """只有過線、沒完成圈的車不該寫進 session_archive。"""
+    tracker = LapTracker(noise_threshold_sec=1.0, car_number_map={TID: "42"})
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    tracker.record_passing(
+        PassingEvent(transponder_id=TID, raw_payload=TID + "0000", received_at=t0)
+    )
+    writer = _RecordingWriter(tracker)
+    manager = SessionManager.start_new(at=t0)
+
+    await manager.archive_and_reset(tracker, writer, trigger="auto_idle", at=t0)
+
+    assert writer.written_points == []
+    assert writer.states_at_write is None
+    assert tracker.all_states() == []
 
 
 async def test_archive_and_reset_skips_write_when_no_states():

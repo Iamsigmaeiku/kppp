@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{% block title %}TKS Dashboard{% endblock %}</title>
-  <link rel="stylesheet" href="/webapp-static/theme.css?v=20260710b" />
+  <link rel="stylesheet" href="/webapp-static/theme.css?v=20260713a" />
   <script defer src="/webapp-static/vendor/alpine.min.js"></script>
   {% block head %}{% endblock %}
 </head>
@@ -12,9 +12,23 @@
   {% block chrome %}
   <div class="topbar">
     <h1>{% block heading %}TKS Dashboard{% endblock %}<span class="sub">Live Timing</span></h1>
-    <div id="authStatus" x-data="{ user: null }" x-init="fetch('/api/auth/me').then(r => r.json()).then(d => user = d.user)">
+    <div id="authStatus" x-data="{
+      user: null,
+      bound: null,
+      init() {
+        fetch('/api/auth/me').then(r => r.json()).then(d => {
+          this.user = d.user;
+          if (d.user) {
+            fetch('/api/bindings/current').then(r => r.json()).then(b => { this.bound = b; }).catch(() => {});
+          }
+        });
+      }
+    }">
+      <template x-if="user && bound && bound.session_id && !bound.bound">
+        <a class="btn banner-chip" href="/profile#bind-form">本節未綁定車號 →</a>
+      </template>
       <template x-if="user">
-        <span class="btn" style="display:inline-flex;align-items:center;gap:0.5rem;">
+        <a class="btn" href="/profile" style="display:inline-flex;align-items:center;gap:0.5rem;">
           <template x-if="user.avatar_url">
             <img :src="user.avatar_url" style="width:1.5rem;height:1.5rem;border-radius:50%;object-fit:cover;background:var(--panel-alt);" />
           </template>
@@ -22,10 +36,10 @@
             <span class="avatar-fallback" style="width:1.5rem;height:1.5rem;font-size:0.75rem;" x-text="(user.display_name || user.email || '?').trim().charAt(0).toUpperCase()"></span>
           </template>
           <span x-text="user.display_name || user.email"></span>
-        </span>
+        </a>
       </template>
       <template x-if="!user">
-        <a class="btn btn-primary" href="/login">登入</a>
+        <a class="btn btn-primary" href="/login?next=/profile">登入</a>
       </template>
     </div>
   </div>

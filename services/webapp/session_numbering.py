@@ -1,8 +1,12 @@
-"""場次每日編號（#1~#100，每天從 1 開始、滿 100 循環）：與 decoder_ingest
-的 SessionManager 用 push-hook 串接（見 dashboard.py 的
-set_session_started_hook），確保每一個真正開始的場次都會依時間先後拿到
-編號，不管有沒有人真的去綁定或瀏覽這節——編號本身可重複使用（只是顯示
-用的短標籤），真正對應資料的還是不會重複的 session_id。
+"""場次每日編號（#1~#100，每天從 1 開始、滿 100 循環）。
+
+重要：不再在「session 一開啟」就佔號。重啟 / 空 reset 會產生一堆沒有圈速
+的空殼 session_id，若當下就編號，下一場實賽會從第 10、11 節起跳，綁定
+與場次列表看起來就像「第五節跟第十節混在一起」。
+
+流程：
+1. on_session_started → 只確保 SQLite 有這列，session_number 先留空
+2. ensure_session_numbered → 第一筆真實過線時才分配下一個號碼
 """
 
 from __future__ import annotations
@@ -21,13 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 async def on_session_started(session_id: str, started_at: datetime) -> None:
-    """decoder_ingest 每次開啟新場次（服務啟動、或 archive_and_reset 換發
-    新 session_id 後）都會呼叫一次；補建 sessions 列並指派當地日期的下一個
-    編號。SQLite 寫入失敗（例如極端邊界情況）只記警告，不該讓
-    decoder_ingest 的場次重置流程被 webapp 這邊的問題卡住。
-    """
-    # 延後到函式內部才 import，避免跟 app.py 在模組載入時互相 import
-    # （app.py 的 configure_app() 會在啟動時把這個函式註冊成 hook）。
+    """新 session_id 出現時只建列、不佔號。"""
     from .app import app
 
     if not getattr(app.state, "webapp_configured", False):
@@ -42,13 +40,49 @@ async def on_session_started(session_id: str, started_at: datetime) -> None:
     async with session_factory() as db:
         try:
             existing = await db.get(RaceSession, session_id)
-            if existing is not None and existing.session_number is not None:
-                return  # 已經編過號了，避免同一個 session_id 被重複觸發時洗掉舊編號
+            if existing is None:
+                db.add(
+                    RaceSession(
+                        id=session_id,
+                        started_at=started_at,
+                        session_date=local_date,
+                        session_number=None,
+                    )
+                )
+                await db.commit()
+            elif existing.session_date is None:
+                existing.session_date = local_date
+                await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("session row upsert failed for %s", session_id)
 
-            count = await db.scalar(
-                select(func.count()).where(RaceSession.session_date == local_date)
+
+async def ensure_session_numbered(session_id: str, started_at: datetime) -> int | None:
+    """第一筆真實過線時呼叫：若尚未編號則分配當天 max+1。回傳編號或 None。"""
+    from .app import app
+
+    if not getattr(app.state, "webapp_configured", False):
+        return None
+
+    session_factory = app.state.session_factory
+    tz = ZoneInfo(app.state.web_config.display_timezone)
+
+    at = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+    local_date = at.astimezone(tz).date()
+
+    async with session_factory() as db:
+        try:
+            existing = await db.get(RaceSession, session_id)
+            if existing is not None and existing.session_number is not None:
+                return existing.session_number
+
+            max_num = await db.scalar(
+                select(func.max(RaceSession.session_number)).where(
+                    RaceSession.session_date == local_date
+                )
             )
-            number = ((count or 0) % 100) + 1
+            number = ((max_num or 0) % 100) + 1
 
             if existing is None:
                 db.add(
@@ -62,13 +96,18 @@ async def on_session_started(session_id: str, started_at: datetime) -> None:
             else:
                 existing.session_date = local_date
                 existing.session_number = number
+                if existing.started_at is None:
+                    existing.started_at = started_at
 
             await db.commit()
+            logger.info(
+                "session numbered: session_id=%s date=%s number=%s",
+                session_id,
+                local_date,
+                number,
+            )
+            return number
         except IntegrityError:
-            # 極端邊界：同一天真的衝到第 101 節以上、或極少見的 race
-            # condition 撞號。編號本身只是好看的顯示用標籤，寧可讓這節
-            # 沒有編號（畫面上退回顯示原始 session_id），也不該讓場次
-            # 重置流程整個失敗。
             await db.rollback()
             logger.warning(
                 "session numbering skipped for %s (date=%s): unique constraint hit",
@@ -76,9 +115,11 @@ async def on_session_started(session_id: str, started_at: datetime) -> None:
                 local_date,
                 exc_info=True,
             )
+            return None
         except Exception:
             await db.rollback()
             logger.exception("session numbering failed for %s", session_id)
+            return None
 
 
 async def resolve_session_id(

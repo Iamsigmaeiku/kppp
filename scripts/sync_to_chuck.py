@@ -65,7 +65,7 @@ def pack_buf() -> bytes:
 ENV_SNIPPET = """
 # --- telemetry / grafana (managed) ---
 TELEMETRY_INGEST_TOKEN=kpp-telemetry-ingest-token-change-me
-GRAFANA_EMBED_URL=/grafana/d/kart-telemetry/karting?orgId=1&kiosk&theme=dark&refresh=2s
+GRAFANA_EMBED_URL=/grafana/d/kart-telemetry/karting?orgId=1&kiosk=tv&theme=dark&refresh=2s
 GRAFANA_UPSTREAM=http://127.0.0.1:3000
 INFLUX_URL=http://127.0.0.1:8086
 INFLUX_TOKEN=kpp-dev-influx-token-change-me
@@ -98,7 +98,8 @@ def main():
         ("TELEMETRY_INGEST_TOKEN", "kpp-telemetry-ingest-token-change-me"),
         (
             "GRAFANA_EMBED_URL",
-            "/grafana/d/kart-telemetry/karting?orgId=1&kiosk&theme=dark&refresh=2s",
+            # kiosk=tv: Grafana 11 TV mode — hide sidebar + top nav in iframe
+            "/grafana/d/kart-telemetry/karting?orgId=1&kiosk=tv&theme=dark&refresh=2s",
         ),
         ("GRAFANA_UPSTREAM", "http://127.0.0.1:3000"),
         ("INFLUX_URL", "http://127.0.0.1:8086"),
@@ -107,12 +108,9 @@ def main():
         ("INFLUX_BUCKET", "decoder"),
         ("DASHBOARD_PORT", "5000"),
     ]:
-        run(
-            c,
-            f"grep -q '^{key}=' ~/kpp/.env && "
-            f"sed -i 's|^{key}=.*|{key}={val}|' ~/kpp/.env || "
-            f"echo '{key}={val}' >> ~/kpp/.env",
-        )
+        # Do NOT use sed with values containing '&' — sed treats & as matched text.
+        run(c, f"grep -v '^{key}=' ~/kpp/.env > /tmp/kpp.env.fix && mv /tmp/kpp.env.fix ~/kpp/.env")
+        run(c, f"printf '%s\\n' '{key}={val}' >> ~/kpp/.env")
 
     run(c, "cd ~/kpp && .venv/bin/pip install -q -r requirements.txt", check=False)
 

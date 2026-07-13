@@ -46,7 +46,36 @@ GRAFANA_EMBED_URL=http://192.168.0.105:3000/grafana/d/kart-telemetry/karting?org
 .venv\Scripts\python -m services.decoder_ingest.main --with-dashboard
 ```
 
+Attitude EKF（IMU → `attitude` measurement，另開一個 terminal）：
+
+```powershell
+.venv\Scripts\python -m services.attitude_ekf.main
+```
+
+賽道彎道標記（本機互動，需 GUI）：
+
+```powershell
+cd tools\track_mapping
+..\..\.venv\Scripts\python mark_features.py
+```
+
 ESP 繼續 POST 到跑 FastAPI 的那台（PC 或之後也搬 Pi）。ingest 會寫進 Pi 的 Influx。
+
+Grafana Phase 2 panels（traction circle / Grip% / yaw / geomap）在 `infra/grafana/dashboards/kart-telemetry.json`；Pi 上更新 repo 後重啟 Grafana container 即可。
+
+## Decoder 圈時校正（務必確認）
+
+`.env` 必須：
+
+```
+DECODER_TICK_HZ=256000
+```
+
+Wire 上 `$[tid12][ticks8][强度4]\\r\\n` 的 ticks 是 **ASCII hex**（`int(s, 16)`），
+圈時 = `(tick2 - tick1) % 2^32 / 256000`。
+
+**不要**把 Wireshark 可印字元當十進位去反推 Hz（會得到錯誤的 ~14250）。
+空字串 `DECODER_TICK_HZ=` 會關掉 tick、改用 wall-clock——僅限 debug，正式環境不要。
 
 ## 防火牆（Pi）
 

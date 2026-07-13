@@ -37,6 +37,9 @@ class SessionManager:
     current_session_id: str
     session_started_at: datetime
     last_activity_at: datetime
+    # 是否已拿到「今天第 N 節」編號。重啟/空 reset 先不編號，等第一筆
+    # 真實過線再編，避免空殼場次把第 6~9 節燒掉、下一場實賽變成第 10 節。
+    numbered: bool = False
 
     @classmethod
     def start_new(cls, *, at: datetime | None = None) -> "SessionManager":
@@ -45,6 +48,25 @@ class SessionManager:
             current_session_id=_new_session_id(now),
             session_started_at=now,
             last_activity_at=now,
+            numbered=False,
+        )
+
+    @classmethod
+    def resume(
+        cls,
+        *,
+        session_id: str,
+        started_at: datetime,
+        last_activity_at: datetime | None = None,
+        numbered: bool = True,
+    ) -> "SessionManager":
+        """從 snapshot 復原同一個 session_id（崩潰復原），不要發新號。"""
+        return cls(
+            current_session_id=session_id,
+            session_started_at=started_at,
+            last_activity_at=last_activity_at or started_at,
+            # 復原中的場次多半已在 SQLite 編過號；若沒有，第一筆過線會補編。
+            numbered=numbered,
         )
 
     def note_activity(self, *, at: datetime | None = None) -> None:
@@ -80,6 +102,7 @@ class SessionManager:
         self.current_session_id = _new_session_id(now)
         self.session_started_at = now
         self.last_activity_at = now
+        self.numbered = False
 
         logger.info(
             "session archived and reset: trigger=%s archived_session_id=%s "
@@ -96,6 +119,12 @@ class SessionManager:
     ) -> list[Point]:
         points: list[Point] = []
         for state in lap_tracker.all_states():
+            # 沒完成任何一圈的噪音過線不要寫進 archive，否則排行榜會出現
+            # 「有場次、但 best_lap_time 全 0」的空殼節次。
+            lap_count = int(state["lap_count"] or 0)
+            best = float(state["best_lap_time"] or 0.0)
+            if lap_count <= 0 and best <= 0.0:
+                continue
             # all_states() 已是 broadcast dict 形式（見
             # LapTracker._to_broadcast_dict），欄位命名沿用同一份定義。
             point = (
@@ -104,11 +133,14 @@ class SessionManager:
                 .tag("transponder_id", state["transponder_id"])
                 .tag("car_number", state["car_number"])
                 .field("registered", bool(state["registered"]))
-                .field("lap_count", int(state["lap_count"]))
-                .field("best_lap_time", float(state["best_lap_time"] or 0.0))
+                .field("lap_count", lap_count)
+                .field("best_lap_time", best)
                 .field("last_lap_time", float(state["last_lap_time"] or 0.0))
                 .field("lap_history_json", json.dumps(state["lap_history"]))
                 .field("reset_trigger", trigger)
+                # 歸檔 _time 是結束時間；開始時間另外存，否則 list_sessions
+                # 用 first()/last() 會得到同一個時間戳。
+                .field("session_started_at", self.session_started_at.timestamp())
                 .time(at)
             )
             points.append(point)

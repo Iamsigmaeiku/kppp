@@ -12,6 +12,8 @@ decoder_ingest 本身不需要知道 SQLite 的存在，維持它只依賴 Influ
 sess-YYYYMMDD-HHMMSS）——numbering 只負責把 #N 解析回對應的 session_id，
 不會改變 CarBinding 本身的存法。留空 session_number 就沿用原本行為，
 綁到目前正在進行的場次。
+
+綁定嚴格 per-session：一人一節一台車；新節不會自動繼承上一節。
 """
 
 from __future__ import annotations
@@ -42,6 +44,13 @@ def _current_session_id() -> str:
     session_manager = get_session_manager()
     if session_manager is None:
         raise HTTPException(status_code=503, detail="lap tracker not initialized")
+    return session_manager.current_session_id
+
+
+def current_session_id_or_none() -> str | None:
+    session_manager = get_session_manager()
+    if session_manager is None:
+        return None
     return session_manager.current_session_id
 
 
@@ -106,22 +115,46 @@ async def bind_car(
 
     await _ensure_session_row(db, session_id)
 
-    result = await db.execute(
+    tid_result = await db.execute(
         select(CarBinding).where(
             CarBinding.session_id == session_id,
             CarBinding.transponder_id == transponder_id,
         )
     )
-    existing_binding = result.scalar_one_or_none()
+    existing_tid = tid_result.scalar_one_or_none()
+    if existing_tid is not None and existing_tid.user_id != user.id:
+        raise HTTPException(status_code=409, detail="這個車號這節已經被其他人綁定")
 
-    if existing_binding is not None:
-        if existing_binding.user_id != user.id:
+    user_result = await db.execute(
+        select(CarBinding).where(
+            CarBinding.user_id == user.id,
+            CarBinding.session_id == session_id,
+        )
+    )
+    existing_user = user_result.scalar_one_or_none()
+
+    if existing_user is not None:
+        # 同一人同一節換車：更新既有列，不開新綁定、不繼承其他節
+        if existing_tid is not None and existing_tid.id != existing_user.id:
             raise HTTPException(status_code=409, detail="這個車號這節已經被其他人綁定")
+        existing_user.transponder_id = transponder_id
+        existing_user.car_number = car_number
+        existing_user.bound_at = datetime.now(timezone.utc)
+        await db.commit()
         return {
             "status": "ok",
             "session_id": session_id,
             "transponder_id": transponder_id,
-            "car_number": existing_binding.car_number,
+            "car_number": existing_user.car_number,
+            "updated": True,
+        }
+
+    if existing_tid is not None:
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "transponder_id": transponder_id,
+            "car_number": existing_tid.car_number,
         }
 
     binding = CarBinding(
@@ -152,14 +185,47 @@ async def my_bindings(
         .order_by(CarBinding.bound_at.desc())
     )
     bindings = result.scalars().all()
+    live_sid = current_session_id_or_none()
     return {
+        "current_session_id": live_sid,
         "bindings": [
             {
                 "session_id": b.session_id,
                 "transponder_id": b.transponder_id,
                 "car_number": b.car_number,
                 "bound_at": b.bound_at.isoformat(),
+                "is_current_session": live_sid is not None and b.session_id == live_sid,
             }
             for b in bindings
-        ]
+        ],
+    }
+
+
+@router.get("/current")
+async def current_session_binding(
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """本節是否已綁定——給 topbar / profile banner 用，絕不回傳上一節。"""
+    live_sid = current_session_id_or_none()
+    if live_sid is None:
+        return {"session_id": None, "bound": False, "binding": None}
+
+    result = await db.execute(
+        select(CarBinding).where(
+            CarBinding.user_id == user.id,
+            CarBinding.session_id == live_sid,
+        )
+    )
+    binding = result.scalar_one_or_none()
+    if binding is None:
+        return {"session_id": live_sid, "bound": False, "binding": None}
+    return {
+        "session_id": live_sid,
+        "bound": True,
+        "binding": {
+            "session_id": binding.session_id,
+            "transponder_id": binding.transponder_id,
+            "car_number": binding.car_number,
+        },
     }

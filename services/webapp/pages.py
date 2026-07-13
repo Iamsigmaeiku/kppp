@@ -12,9 +12,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from services.decoder_ingest.dashboard import get_session_manager
+
 from .avatars import avatar_url_for
 from .deps import get_current_user, get_db
-from .models import AiCoachReport, CarBinding, User
+from .models import AiCoachReport, CarBinding, User, public_display_name
 
 router = APIRouter()
 
@@ -37,9 +39,9 @@ async def dashboard_page(
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, user: User | None = Depends(get_current_user)):
-    nxt = request.query_params.get("next") or "/"
+    nxt = request.query_params.get("next") or "/profile"
     if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/"
+        nxt = "/profile"
     if user is not None:
         return RedirectResponse(url=nxt)
 
@@ -47,6 +49,11 @@ async def login_page(request: Request, user: User | None = Depends(get_current_u
     request.session["post_login_next"] = nxt
 
     web_config = request.app.state.web_config
+    err = request.query_params.get("error")
+    error_message = None
+    if err == "oauth":
+        error_message = "Google 登入失敗（連線中斷或狀態已過期），請再試一次。"
+
     return request.app.state.templates.TemplateResponse(
         request,
         "login.html",
@@ -54,6 +61,7 @@ async def login_page(request: Request, user: User | None = Depends(get_current_u
             "google_enabled": web_config.google is not None,
             "dev_bypass": web_config.auth_dev_bypass,
             "next": nxt,
+            "error_message": error_message,
         },
     )
 
@@ -80,7 +88,7 @@ async def profile_page(
     db: AsyncSession = Depends(get_db),
 ):
     if user is None:
-        return RedirectResponse(url="/login")
+        return RedirectResponse(url="/login?next=/profile")
 
     binding_result = await db.execute(
         select(CarBinding)
@@ -88,7 +96,16 @@ async def profile_page(
         .options(selectinload(CarBinding.session))
         .order_by(CarBinding.bound_at.desc())
     )
-    bindings = binding_result.scalars().all()
+    bindings = list(binding_result.scalars().all())
+
+    sm = get_session_manager()
+    current_session_id = sm.current_session_id if sm is not None else None
+    current_bindings = [
+        b for b in bindings if current_session_id and b.session_id == current_session_id
+    ]
+    history_bindings = [
+        b for b in bindings if not current_session_id or b.session_id != current_session_id
+    ]
 
     report_result = await db.execute(
         select(AiCoachReport)
@@ -99,19 +116,31 @@ async def profile_page(
     for report in report_result.scalars().all():
         key = f"{report.session_id}::{report.transponder_id}"
         if key in reports_by_key:
-            continue  # 已經是最新的一筆（依 created_at desc 排序取第一筆）
-        try:
-            reports_by_key[key] = json.loads(report.response_json)
-        except (TypeError, ValueError):
             continue
+        payload: dict = {
+            "id": report.id,
+            "status": report.status,
+            "error_message": report.error_message,
+            "report": None,
+        }
+        if report.status == "done" and report.response_json:
+            try:
+                payload["report"] = json.loads(report.response_json)
+            except (TypeError, ValueError):
+                pass
+        reports_by_key[key] = payload
 
     return request.app.state.templates.TemplateResponse(
         request,
         "profile.html",
         {
             "user": user,
+            "display_name": public_display_name(user),
             "avatar_url": avatar_url_for(user),
-            "bindings": bindings,
+            "current_session_id": current_session_id,
+            "current_bindings": current_bindings,
+            "history_bindings": history_bindings,
             "reports_by_key": reports_by_key,
+            "needs_bind": bool(current_session_id) and not current_bindings,
         },
     )

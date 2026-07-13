@@ -8,47 +8,29 @@
 {% if influx_unavailable %}
 <div class="panel"><div class="empty-state">歷史資料庫目前無法連線，請稍後再試。</div></div>
 {% endif %}
-{% if current_session_id %}
-<div class="panel">
-  <div class="panel-header">本節排行榜 · {{ current_session_id }}</div>
-  {% if session_entries %}
-    {{ podium(session_entries) }}
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr><th>排名</th><th>車號</th><th>最佳圈速</th></tr>
-        </thead>
-        <tbody>
-          {% for e in session_entries %}
-          <tr class="rank-{{ loop.index }}">
-            <td><span class="rank-badge">{{ loop.index }}</span></td>
-            <td class="car">{{ e.name }}</td>
-            <td class="best">{{ e.time_label }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% else %}
-    <div class="empty-state">這節還沒有任何一圈完成的紀錄</div>
-  {% endif %}
-</div>
-{% endif %}
 
 <div class="panel">
   <div class="panel-header">全站歷史最佳（最近 50 名）</div>
   {% if alltime_entries %}
     {{ podium(alltime_entries) }}
     <div class="table-wrap">
-      <table>
+      <table class="lb-table">
         <thead>
-          <tr><th>排名</th><th>車號</th><th>最佳圈速</th><th>來自場次</th></tr>
+          <tr><th>排名</th><th>車手</th><th>車號</th><th>最佳圈速</th><th>來自場次</th></tr>
         </thead>
         <tbody>
           {% for e in alltime_entries %}
           <tr class="rank-{{ loop.index }}">
             <td><span class="rank-badge">{{ loop.index }}</span></td>
-            <td class="car">{{ e.name }}</td>
+            <td class="driver-cell">
+              {% if e.avatar_url %}
+              <img class="lb-avatar" src="{{ e.avatar_url }}" alt="" referrerpolicy="no-referrer" />
+              {% else %}
+              <span class="lb-avatar avatar-fallback">{{ ((e.driver_name or e.car_number or "?")|string)[0] | upper }}</span>
+              {% endif %}
+              <span>{{ e.driver_name or "—" }}</span>
+            </td>
+            <td class="car">{{ e.car_number }}</td>
             <td class="best">{{ e.time_label }}</td>
             <td class="tid"><a href="/sessions/{{ e.session_id }}">{{ e.session_id }}</a></td>
           </tr>
@@ -60,4 +42,39 @@
     <div class="empty-state">目前還沒有任何已歸檔的場次資料</div>
   {% endif %}
 </div>
+
+{% if current_session_id %}
+<div class="panel">
+  <div class="panel-header">本節排行榜 · {{ current_session_id }}</div>
+  {% if session_entries %}
+    {{ podium(session_entries) }}
+    <div class="table-wrap">
+      <table class="lb-table">
+        <thead>
+          <tr><th>排名</th><th>車手</th><th>車號</th><th>最佳圈速</th></tr>
+        </thead>
+        <tbody>
+          {% for e in session_entries %}
+          <tr class="rank-{{ loop.index }}">
+            <td><span class="rank-badge">{{ loop.index }}</span></td>
+            <td class="driver-cell">
+              {% if e.avatar_url %}
+              <img class="lb-avatar" src="{{ e.avatar_url }}" alt="" referrerpolicy="no-referrer" />
+              {% else %}
+              <span class="lb-avatar avatar-fallback">{{ ((e.driver_name or e.car_number or "?")|string)[0] | upper }}</span>
+              {% endif %}
+              <span>{{ e.driver_name or "—" }}</span>
+            </td>
+            <td class="car">{{ e.car_number }}</td>
+            <td class="best">{{ e.time_label }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state">這節還沒有任何一圈完成的紀錄</div>
+  {% endif %}
+</div>
+{% endif %}
 {% endblock %}

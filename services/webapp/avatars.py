@@ -1,6 +1,6 @@
-"""頭像：預設用 Google 登入帶回的大頭貼，允許上傳自訂圖片覆蓋。上傳的檔案
-存在本機磁碟（AVATAR_UPLOAD_DIR），透過 StaticFiles 掛在 /uploads/avatars/
-（見 app.py）。
+"""頭像與暱稱：預設用 Google 登入帶回的大頭貼，允許上傳自訂圖片覆蓋。
+上傳的檔案存在本機磁碟（AVATAR_UPLOAD_DIR），透過 StaticFiles 掛在
+/uploads/avatars/（見 app.py）。暱稱存在 users.nickname，Google 登入不會覆寫。
 """
 
 from __future__ import annotations
@@ -10,10 +10,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from PIL import Image
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .deps import get_db, require_user
-from .models import User
+from .models import User, public_display_name
 
 router = APIRouter(prefix="/api/profile")
 
@@ -21,6 +22,7 @@ AVATAR_STATIC_PREFIX = "/uploads/avatars"
 MAX_AVATAR_DIMENSION = 512
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_NICKNAME_LEN = 32
 
 
 def avatar_url_for(user: User) -> str | None:
@@ -28,6 +30,31 @@ def avatar_url_for(user: User) -> str | None:
     if user.avatar_path:
         return f"{AVATAR_STATIC_PREFIX}/{Path(user.avatar_path).name}"
     return user.google_picture_url
+
+
+class NicknameRequest(BaseModel):
+    nickname: str = Field(default="", max_length=MAX_NICKNAME_LEN)
+
+
+@router.post("/nickname")
+async def update_nickname(
+    body: NicknameRequest,
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    fresh_user = await db.get(User, user.id)
+    if fresh_user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    cleaned = body.nickname.strip()
+    if len(cleaned) > MAX_NICKNAME_LEN:
+        raise HTTPException(status_code=400, detail=f"暱稱最多 {MAX_NICKNAME_LEN} 字")
+    fresh_user.nickname = cleaned or None
+    await db.commit()
+    await db.refresh(fresh_user)
+    return {
+        "nickname": fresh_user.nickname,
+        "display_name": public_display_name(fresh_user),
+    }
 
 
 @router.post("/avatar")

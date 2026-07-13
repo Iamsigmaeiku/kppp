@@ -16,17 +16,31 @@ TIMER_TIMEOUT_SEC = 120.0
 MAX_LAP_TIME_SEC = 600.0
 LAP_HISTORY_MAX = 20
 DEFAULT_CAR_NUMBER_MAP: dict[str, str] = {
-    "14021124C868": "11",
-    "140210B98368": "13",
-    "140210E3C468": "14",
-    "140201B81B68": "15",
-    "140210D7E869": "16",
-    "140211084268": "17",
-    "140211241C6D": "18",
-    "140215494F68": "19",
-    "140210998E69": "20",
-    
+    # 2026-07-12 現場晶片（UID 尾碼會在 6/7/8 漂移，見 normalize_transponder_id）
+    "14021124C877": "11",
+    "140215359577": "12",
+    "140210B98377": "13",
+    "148210E3C477": "14",
+    "140210E3C477": "14",
+    "140201B81B77": "15",
+    "140210D7E877": "16",
+    "140211084277": "17",
+    "140211241C77": "18",
+    "140215494F77": "19",
+    "140210998E77": "20",
 }
+
+
+def normalize_transponder_id(transponder_id: str) -> str:
+    """同一實體晶片最後一個 hex nibble 會在 6/7/8 間漂（現場已見 76/77、77/78
+    成對出現）。只把這三個不穩定尾碼收成 canonical ``7``，其餘尾碼不動。
+    """
+    tid = transponder_id.upper().strip()
+    if len(tid) >= 12 and all(c in "0123456789ABCDEF" for c in tid[:12]):
+        if tid[11] in "678":
+            return tid[:11] + "7"
+        return tid[:12]
+    return tid
 
 
 @dataclass
@@ -65,7 +79,7 @@ class LapTracker:
         # tick 欄位計算圈速（見 record_passing）。
         self._decoder_tick_hz = decoder_tick_hz
         self._car_number_map = {
-            tid.upper(): car
+            normalize_transponder_id(tid): car
             for tid, car in (car_number_map or DEFAULT_CAR_NUMBER_MAP).items()
         }
         self._states: dict[str, TransponderState] = {}
@@ -80,10 +94,10 @@ class LapTracker:
         return len(self._connected_decoder_ids) > 0
 
     def is_registered(self, transponder_id: str) -> bool:
-        return transponder_id.upper() in self._car_number_map
+        return normalize_transponder_id(transponder_id) in self._car_number_map
 
     def car_number_for(self, transponder_id: str) -> str:
-        return self._car_number_map[transponder_id.upper()]
+        return self._car_number_map[normalize_transponder_id(transponder_id)]
 
     def transponder_id_for_car(self, car_number: str) -> str | None:
         """反查車號對應的 transponder_id（供使用者用車號綁定，而非直接貼
@@ -116,6 +130,31 @@ class LapTracker:
             # 的凍結，讓計時從 last_passing_at 恢復即時累計。真的閒置太久
             # 的車輛會被 _timer_snapshot() 的 timer_timeout 邏輯重新凍結。
             self._unfreeze_all_timers()
+
+    def all_timers_inactive(self) -> bool:
+        """所有已過線車輛的本圈計時都已凍結（逾時或 decoder 斷線）。
+        空場次回 False。供 auto-archive：全車暫停代表這一節實質結束。
+        """
+        if not self._states:
+            return False
+        now = datetime.now(timezone.utc)
+        for state in self._states.values():
+            if state.last_passing_at is None:
+                continue
+            _, timer_active = self._timer_snapshot(state, at=now)
+            if timer_active:
+                return False
+        # 至少要有一台車真的過過線，否則「全停」沒意義
+        return any(s.last_passing_at is not None for s in self._states.values())
+
+    def has_archivable_results(self) -> bool:
+        """是否有值得寫進 session_archive 的圈速（與 archive 過濾條件對齊）。"""
+        for state in self._states.values():
+            if state.lap_count > 0 or (
+                state.best_lap_time is not None and state.best_lap_time > 0
+            ):
+                return True
+        return False
 
     def _freeze_all_timers(self, *, at: datetime | None = None) -> None:
         now = at or datetime.now(timezone.utc)
@@ -276,7 +315,8 @@ class LapTracker:
         }
 
     def record_passing(self, event: PassingEvent) -> dict:
-        transponder_id = event.transponder_id.upper()
+        # 一律用 canonical UID 當 state key，否則同一台車 77/78 會變成兩筆。
+        transponder_id = normalize_transponder_id(event.transponder_id)
         state = self._states.setdefault(transponder_id, TransponderState())
         state.last_raw_payload = event.raw_payload
         state.clear_timer_freeze()
@@ -359,12 +399,20 @@ class LapTracker:
         tick_lap_time = tick_delta / self._decoder_tick_hz
 
         if abs(tick_lap_time - fallback_lap_time) > 0.5:
+            implied_hz = (
+                tick_delta / fallback_lap_time if fallback_lap_time > 0 else None
+            )
             logger.warning(
                 "lap_time mismatch for %s: tick-based=%.3fs received_at-based=%.3fs "
-                "(using tick-based; check DECODER_TICK_HZ if this persists)",
+                "tick_delta=%s decoder_tick_hz=%s implied_hz_if_wallclock=%.3f "
+                "(using tick-based; ticks are ASCII hex / 256000 — do NOT set "
+                "DECODER_TICK_HZ≈14250 from decimal misread of Wireshark)",
                 transponder_id,
                 tick_lap_time,
                 fallback_lap_time,
+                tick_delta,
+                self._decoder_tick_hz,
+                implied_hz if implied_hz is not None else float("nan"),
             )
 
         return tick_lap_time
@@ -414,7 +462,7 @@ class LapTracker:
 
     def load_snapshot(self, data: dict) -> None:
         """從 to_snapshot_dict() 產生的資料復原狀態；任何解析失敗的單筆
-        紀錄會被跳過而不中斷整體載入。
+        紀錄會被跳過而不中斷整體載入。UID 會正規化，77/78 漂移合併。
         """
         states = data.get("states", {})
         for tid, raw in states.items():
@@ -424,7 +472,8 @@ class LapTracker:
                     if raw.get("last_passing_at")
                     else None
                 )
-                self._states[tid] = TransponderState(
+                canon = normalize_transponder_id(tid)
+                incoming = TransponderState(
                     lap_count=raw.get("lap_count", 0),
                     last_passing_at=last_passing_at,
                     last_lap_time=raw.get("last_lap_time"),
@@ -433,5 +482,19 @@ class LapTracker:
                     last_raw_payload=raw.get("last_raw_payload"),
                     last_passing_tick=raw.get("last_passing_tick"),
                 )
+                existing = self._states.get(canon)
+                if existing is None:
+                    self._states[canon] = incoming
+                    continue
+                # 同一 canonical UID 若 snapshot 裡同時有 77/78 兩筆，合併成
+                # 圈數較多 / 最佳圈較快的那份，避免復原後資料被較差的蓋掉。
+                if incoming.lap_count > existing.lap_count or (
+                    incoming.best_lap_time is not None
+                    and (
+                        existing.best_lap_time is None
+                        or incoming.best_lap_time < existing.best_lap_time
+                    )
+                ):
+                    self._states[canon] = incoming
             except (KeyError, TypeError, ValueError):
                 logger.warning("skipping malformed snapshot entry for %s", tid)

@@ -10,6 +10,7 @@ SQLite 查詢失敗一樣不該讓整頁掛掉，只是退回顯示原始 sessio
 from __future__ import annotations
 
 import logging
+from typing import TypedDict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -18,20 +19,79 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.decoder_ingest.influx_reader import InfluxReader
 
+from .avatars import avatar_url_for
 from .deps import get_db
-from .models import RaceSession
+from .models import CarBinding, RaceSession, User, public_display_name
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+class DriverInfo(TypedDict):
+    avatar_url: str | None
+    driver_name: str | None
+
+
 def _get_reader(request: Request) -> InfluxReader:
     return request.app.state.influx_reader
 
 
+async def _binding_lookups(
+    db: AsyncSession,
+) -> tuple[dict[tuple[str, str], DriverInfo], dict[str, DriverInfo]]:
+    """回傳 (by_session_tid, by_tid)。
+
+    by_session_tid: (session_id, transponder_id) → 本節綁定的頭像/名稱
+    by_tid: transponder_id → 全站歷史用（同一 TID 多綁定取最新）；
+            **本節排行榜不可用 by_tid**，否則會造成跨節「看起來還綁著」。
+    """
+    by_session_tid: dict[tuple[str, str], DriverInfo] = {}
+    by_tid: dict[str, DriverInfo] = {}
+    try:
+        result = await db.execute(
+            select(CarBinding, User)
+            .join(User, User.id == CarBinding.user_id)
+            .order_by(CarBinding.bound_at.desc())
+        )
+        for binding, user in result.all():
+            tid = (binding.transponder_id or "").upper()
+            if not tid:
+                continue
+            info: DriverInfo = {
+                "avatar_url": avatar_url_for(user),
+                "driver_name": public_display_name(user),
+            }
+            by_session_tid[(binding.session_id, tid)] = info
+            by_tid.setdefault(tid, info)
+    except Exception:
+        logger.exception("leaderboard: failed to load avatar bindings from SQLite")
+    return by_session_tid, by_tid
+
+
+def _entry_from_row(
+    *,
+    car_number: str | None,
+    transponder_id: str,
+    best_lap_time: float | None,
+    time_label: str,
+    session_id: str | None,
+    driver: DriverInfo | None,
+) -> dict:
+    return {
+        "name": car_number or transponder_id,
+        "car_number": car_number or transponder_id,
+        "driver_name": (driver or {}).get("driver_name"),
+        "avatar_url": (driver or {}).get("avatar_url"),
+        "time_label": time_label,
+        "transponder_id": transponder_id,
+        "best_lap_time": best_lap_time,
+        "session_id": session_id,
+    }
+
+
 @router.get("/leaderboard", response_class=HTMLResponse)
-async def leaderboard_page(request: Request):
+async def leaderboard_page(request: Request, db: AsyncSession = Depends(get_db)):
     reader = _get_reader(request)
     laptime = request.app.state.templates.env.filters["laptime"]
 
@@ -39,36 +99,50 @@ async def leaderboard_page(request: Request):
     session_entries: list[dict] = []
     current_session_id: str | None = None
     influx_unavailable = False
+    by_session_tid, by_tid = await _binding_lookups(db)
 
     try:
         alltime = await reader.get_alltime_best(limit=50)
         entries = [
-            {
-                "name": e.car_number or e.transponder_id,
-                "avatar_url": None,
-                "time_label": laptime(e.best_lap_time),
-                "transponder_id": e.transponder_id,
-                "best_lap_time": e.best_lap_time,
-                "session_id": e.session_id,
-            }
+            _entry_from_row(
+                car_number=e.car_number,
+                transponder_id=e.transponder_id,
+                best_lap_time=e.best_lap_time,
+                time_label=laptime(e.best_lap_time),
+                session_id=e.session_id,
+                # 全站：優先該場次綁定，否則同 TID 最近綁定（歷史紀錄合理）
+                driver=by_session_tid.get(
+                    (e.session_id, e.transponder_id.upper()),
+                    by_tid.get(e.transponder_id.upper()),
+                ),
+            )
             for e in alltime
         ]
 
         sessions = await reader.list_sessions(range_start="-1d")
-        current_session_id = sessions[0].session_id if sessions else None
-        if current_session_id:
-            summary = await reader.get_session_summary(current_session_id)
-            session_entries = [
-                {
-                    "name": r.car_number or r.transponder_id,
-                    "avatar_url": None,
-                    "time_label": laptime(r.best_lap_time or None),
-                    "transponder_id": r.transponder_id,
-                    "best_lap_time": r.best_lap_time,
-                }
+        # 跳過「有歸檔列但沒有任何完成圈」的空殼節（例如 auto_idle 誤歸檔），
+        # 否則排行榜會顯示「這節還沒有任何一圈完成的紀錄」。
+        for sess in sessions:
+            summary = await reader.get_session_summary(sess.session_id)
+            candidate = [
+                _entry_from_row(
+                    car_number=r.car_number,
+                    transponder_id=r.transponder_id,
+                    best_lap_time=r.best_lap_time,
+                    time_label=laptime(r.best_lap_time or None),
+                    session_id=sess.session_id,
+                    # 本節：只認本節綁定，禁止跨節 by_tid fallback
+                    driver=by_session_tid.get(
+                        (sess.session_id, r.transponder_id.upper())
+                    ),
+                )
                 for r in summary
-                if r.best_lap_time
+                if r.best_lap_time and r.best_lap_time > 0
             ]
+            if candidate:
+                current_session_id = sess.session_id
+                session_entries = candidate
+                break
     except Exception:
         logger.exception("leaderboard: failed to read from InfluxDB")
         influx_unavailable = True
@@ -91,7 +165,12 @@ async def sessions_page(request: Request, db: AsyncSession = Depends(get_db)):
     influx_unavailable = False
     sessions = []
     try:
-        sessions = await reader.list_sessions(range_start="-90d")
+        raw_sessions = await reader.list_sessions(range_start="-90d")
+        # 空殼歸檔（best 全 0 / 沒完成圈）不進列表，否則會跟實賽節次混在一起。
+        for sess in raw_sessions:
+            summary = await reader.get_session_summary(sess.session_id)
+            if any(r.best_lap_time and r.best_lap_time > 0 for r in summary):
+                sessions.append(sess)
     except Exception:
         logger.exception("sessions: failed to read from InfluxDB")
         influx_unavailable = True
@@ -106,7 +185,7 @@ async def sessions_page(request: Request, db: AsyncSession = Depends(get_db)):
             )
             numbering = {rs.id: rs for rs in result.scalars().all()}
     except Exception:
-        logger.exception("sessions: failed to read session numbering from SQLite")
+        logger.exception("sessions: failed to load session numbering from SQLite")
 
     return request.app.state.templates.TemplateResponse(
         request,
@@ -147,7 +226,9 @@ async def session_detail_page(
 
 
 @router.get("/api/sessions/{session_id}/laps/{transponder_id}")
-async def session_lap_history_api(request: Request, session_id: str, transponder_id: str):
+async def session_lap_history_api(
+    request: Request, session_id: str, transponder_id: str
+):
     reader = _get_reader(request)
     laptime_filter = request.app.state.templates.env.filters["laptime"]
     try:

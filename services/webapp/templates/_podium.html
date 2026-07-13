@@ -4,11 +4,12 @@
   {% for entry in entries[:3] %}
   <div class="podium-slot place-{{ loop.index }}">
     {% if entry.avatar_url %}
-    <img class="podium-avatar" src="{{ entry.avatar_url }}" alt="" />
+    <img class="podium-avatar" src="{{ entry.avatar_url }}" alt="" referrerpolicy="no-referrer" />
     {% else %}
-    <span class="podium-avatar avatar-fallback">{{ (entry.name or "?").strip()[0] | upper }}</span>
+    <span class="podium-avatar avatar-fallback">{{ ((entry.driver_name or entry.name or "?")|string).strip()[0] | upper }}</span>
     {% endif %}
-    <div class="podium-name">{{ entry.name }}</div>
+    <div class="podium-name">{{ entry.driver_name or "未綁定" }}</div>
+    <div class="podium-car">#{{ entry.car_number or entry.name }}</div>
     <div class="podium-time">{{ entry.time_label }}</div>
     <div class="podium-block">{{ loop.index }}</div>
   </div>

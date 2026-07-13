@@ -193,3 +193,112 @@ def test_bindings_by_session_number_404_when_not_found(webapp_client):
     finally:
         set_lap_tracker(None)
         set_session_manager(None, None)
+
+
+def test_bindings_update_same_session_car_number(webapp_client):
+    """同一節換車號：更新既有綁定，不開第二列。"""
+    from services.decoder_ingest.dashboard import set_lap_tracker, set_session_manager
+    from services.decoder_ingest.lap_tracker import LapTracker
+    from services.decoder_ingest.session_manager import SessionManager
+
+    lap_tracker = LapTracker(
+        car_number_map={"AAAAAAAAAAAA": "19", "BBBBBBBBBBBB": "17"}
+    )
+    set_lap_tracker(lap_tracker)
+    set_session_manager(SessionManager.start_new(), None)
+    try:
+        webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+        r1 = webapp_client.post("/api/bindings", json={"car_number": "19"})
+        assert r1.status_code == 200
+        sid = r1.json()["session_id"]
+
+        r2 = webapp_client.post("/api/bindings", json={"car_number": "17"})
+        assert r2.status_code == 200
+        assert r2.json()["car_number"] == "17"
+        assert r2.json()["session_id"] == sid
+        assert r2.json().get("updated") is True
+
+        me = webapp_client.get("/api/bindings/me").json()
+        current = [b for b in me["bindings"] if b["session_id"] == sid]
+        assert len(current) == 1
+        assert current[0]["car_number"] == "17"
+    finally:
+        set_lap_tracker(None)
+        set_session_manager(None, None)
+
+
+def test_bindings_current_false_when_only_previous_session(webapp_client, webapp_app):
+    """上一節綁過 ≠ 本節已綁定（is_current_session /current 不認歷史）。"""
+    import asyncio
+
+    from services.decoder_ingest.dashboard import set_lap_tracker, set_session_manager
+    from services.decoder_ingest.lap_tracker import LapTracker
+    from services.decoder_ingest.session_manager import SessionManager
+
+    asyncio.run(
+        _seed_race_session(webapp_app, session_id="sess-prev-only", session_number=3)
+    )
+
+    lap_tracker = LapTracker(car_number_map={"AABBCCDDEEFF": "19"})
+    sm = SessionManager.start_new()
+    set_lap_tracker(lap_tracker)
+    set_session_manager(sm, None)
+    try:
+        webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+        r = webapp_client.post(
+            "/api/bindings", json={"car_number": "19", "session_number": 3}
+        )
+        assert r.status_code == 200
+        assert r.json()["session_id"] == "sess-prev-only"
+
+        me = webapp_client.get("/api/bindings/me").json()
+        prev = [b for b in me["bindings"] if b["session_id"] == "sess-prev-only"]
+        assert len(prev) == 1
+        assert prev[0]["is_current_session"] is False
+
+        cur = webapp_client.get("/api/bindings/current").json()
+        assert cur["session_id"] == sm.current_session_id
+        # 歷史節的綁定絕不能冒充本節
+        if cur["bound"]:
+            assert cur["binding"]["session_id"] == sm.current_session_id
+            assert cur["binding"]["session_id"] != "sess-prev-only"
+        else:
+            assert cur["binding"] is None
+    finally:
+        set_lap_tracker(None)
+        set_session_manager(None, None)
+
+
+def test_nickname_update_and_me_reflects(webapp_client):
+    webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+    r = webapp_client.post("/api/profile/nickname", json={"nickname": "快車手"})
+    assert r.status_code == 200
+    assert r.json()["nickname"] == "快車手"
+    assert r.json()["display_name"] == "快車手"
+
+    me = webapp_client.get("/api/auth/me").json()["user"]
+    assert me["nickname"] == "快車手"
+    assert me["display_name"] == "快車手"
+
+
+def test_leaderboard_alltime_section_before_session(webapp_client):
+    webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+    r = webapp_client.get("/leaderboard")
+    assert r.status_code == 200
+    body = r.text
+    i_all = body.find("全站歷史最佳")
+    i_sess = body.find("本節排行榜")
+    assert i_all >= 0
+    # 本節可能因無資料不渲染；有的話必須在全站之後
+    if i_sess >= 0:
+        assert i_all < i_sess
+
+
+def test_profile_page_loads_with_bind_cta(webapp_client):
+    webapp_client.get("/api/auth/dev-login", follow_redirects=False)
+    r = webapp_client.get("/profile")
+    assert r.status_code == 200
+    assert "綁定本節車號" in r.text
+    assert "歷史綁定" in r.text
+    assert "如何綁定節次與車號" in r.text
+    assert "改暱稱" in r.text

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # 專案根目錄的 .env（若存在）在 import 當下就載入，
 # 已存在的環境變數優先，不會被 .env 覆蓋。
@@ -75,6 +78,8 @@ class AppConfig:
     snapshot_interval_sec: float
     log_level: str
     auto_archive_idle_sec: float
+    # 全車本圈計時都已凍結後，再閒置這麼久就歸檔（比 idle 短，場次結束更快落盤）
+    auto_archive_all_frozen_sec: float
     passing_calibration_path: Path | None
 
 
@@ -128,11 +133,22 @@ def _env_decoder_tick_hz(
     *,
     default: float = DEFAULT_DECODER_TICK_HZ,
 ) -> float | None:
-    """未設定 → 預設 256000；明確空字串 → None（關閉 tick，改用 wall-clock）。"""
+    """未設定 → 預設 256000；明確空字串 → None（關閉 tick，改用 wall-clock）。
+
+    Wire 上的 tick 欄位是 ASCII hex digits（看起來像十進位數字），必須用
+    int(..., 16) 解碼後再 / 256000。不要把 Wireshark 顯示的字元當十進位去
+    反推 Hz（會得到錯誤的 ~14250）。
+    """
     raw = os.getenv(name)
     if raw is None:
         return default
     if not raw.strip():
+        logger.warning(
+            "%s is blank — tick-based lap timing DISABLED; using wall-clock "
+            "(debug-only; production should set %s=256000)",
+            name,
+            name,
+        )
         return None
     try:
         return float(raw.strip())
@@ -148,7 +164,10 @@ def _env_optional_path(name: str) -> Path | None:
 
 
 DEFAULT_CAR_NUMBER_MAP = (
-    "140210B98368:13,140210E3C468:14,14021124C868:11,140201B81B68:15"
+    "14021124C877:11,140215359577:12,140210B98377:13,"
+    "148210E3C477:14,140210E3C477:14,140201B81B77:15,"
+    "140210D7E877:16,140211084277:17,140211241C77:18,"
+    "140215494F77:19,140210998E77:20"
 )
 
 
@@ -172,8 +191,14 @@ def _env_car_number_map(name: str = "CAR_NUMBER_MAP") -> dict[str, str]:
             raise ConfigError(
                 f"環境變數 {name} 格式錯誤，transponder 與車號不可為空，收到: {item!r}"
             )
-        mapping[transponder_id] = car_number
+        mapping[normalize_tid(transponder_id)] = car_number
     return mapping
+
+
+def normalize_tid(transponder_id: str) -> str:
+    from services.decoder_ingest.lap_tracker import normalize_transponder_id
+
+    return normalize_transponder_id(transponder_id)
 
 
 def _env_decoders(
@@ -336,6 +361,10 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
     if auto_archive_idle_sec <= 0:
         raise ConfigError("AUTO_ARCHIVE_IDLE_SEC 必須 > 0")
 
+    auto_archive_all_frozen_sec = _env_float("AUTO_ARCHIVE_ALL_FROZEN_SEC", 300.0)
+    if auto_archive_all_frozen_sec <= 0:
+        raise ConfigError("AUTO_ARCHIVE_ALL_FROZEN_SEC 必須 > 0")
+
     return AppConfig(
         decoders=decoders,
         influx=influx,
@@ -352,5 +381,6 @@ def load_config(*, dry_run: bool = False) -> AppConfig:
         snapshot_interval_sec=snapshot_interval_sec,
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         auto_archive_idle_sec=auto_archive_idle_sec,
+        auto_archive_all_frozen_sec=auto_archive_all_frozen_sec,
         passing_calibration_path=_env_optional_path("PASSING_CALIBRATION_PATH"),
     )
