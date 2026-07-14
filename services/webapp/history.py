@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.decoder_ingest.influx_reader import InfluxReader
 
+from . import session_numbering
 from .avatars import avatar_url_for
 from .deps import get_db
 from .models import CarBinding, RaceSession, User, public_display_name
@@ -175,17 +176,16 @@ async def sessions_page(request: Request, db: AsyncSession = Depends(get_db)):
         logger.exception("sessions: failed to read from InfluxDB")
         influx_unavailable = True
 
-    numbering: dict[str, RaceSession] = {}
+    numbering: dict[str, dict] = {}
     try:
         if sessions:
-            result = await db.execute(
-                select(RaceSession).where(
-                    RaceSession.id.in_([s.session_id for s in sessions])
-                )
+            tz_name = request.app.state.web_config.display_timezone
+            # 直接依 Influx 列表算「第 N 節」，不靠 SQLite（空殼燒掉號也不會退回 sess-…）
+            numbering = await session_numbering.backfill_numbers_for_sessions(
+                db, sessions, tz_name=tz_name
             )
-            numbering = {rs.id: rs for rs in result.scalars().all()}
     except Exception:
-        logger.exception("sessions: failed to load session numbering from SQLite")
+        logger.exception("sessions: failed to load/backfill session numbering")
 
     return request.app.state.templates.TemplateResponse(
         request,
@@ -215,6 +215,21 @@ async def session_detail_page(
     race_session: RaceSession | None = None
     try:
         race_session = await db.get(RaceSession, session_id)
+        if race_session is None or race_session.session_number is None:
+            from datetime import datetime, timezone
+
+            started = race_session.started_at if race_session else None
+            if started is None:
+                try:
+                    ts = session_id.removeprefix("sess-")
+                    started = datetime.strptime(ts, "%Y%m%d-%H%M%S").replace(
+                        tzinfo=timezone.utc
+                    )
+                except ValueError:
+                    started = datetime.now(timezone.utc)
+            await session_numbering.ensure_session_numbered(session_id, started)
+            await db.expire_all()
+            race_session = await db.get(RaceSession, session_id)
     except Exception:
         logger.exception("session_detail: failed to read session numbering from SQLite")
 

@@ -42,6 +42,11 @@ def get_session_manager():
     return _session_manager
 
 
+def get_influx_writer():
+    """供 webapp 手動歸檔時寫入 session_archive。"""
+    return _influx_writer
+
+
 def set_reset_hook(callback) -> None:
     """註冊一個 reset 後要立即執行的同步 callback（例如立刻寫一次
     session snapshot），避免 reset 後、下次週期性 snapshot 寫入前的空窗期
@@ -192,10 +197,19 @@ async def broadcast_session_reset(*, reset_at: str) -> None:
     )
 
 
-async def broadcast_session_info(session_id: str) -> None:
-    """通知所有已連線客戶端目前的 session_id，讓前端能查詢
-    GET /api/sessions/{session_id}/laps/{transponder_id}（每一圈的圈時
-    展開明細）。在新場次開始時（服務啟動、或 archive_and_reset 換發新
-    session_id 後）廣播一次。
+async def broadcast_session_info(
+    session_id: str,
+    *,
+    session_number: int | None = None,
+    session_date: str | None = None,
+) -> None:
+    """通知所有已連線客戶端目前的 session_id（與可選的「第 N 節」標籤），
+    讓前端能查詢 GET /api/sessions/{session_id}/laps/{transponder_id}，
+    並在工具列顯示節次。新場次開始、或第一筆過線剛編好號時廣播。
     """
-    await broadcast_message({"type": "session_info", "session_id": session_id})
+    payload: dict = {"type": "session_info", "session_id": session_id}
+    if session_number is not None:
+        payload["session_number"] = session_number
+    if session_date is not None:
+        payload["session_date"] = session_date
+    await broadcast_message(payload)

@@ -1,28 +1,45 @@
-    /**
- * ESP32-WROOM-32 + ICM-42688-P (I2C) + DHT11 + NEO-6M GPS (UART1) → HTTP ingest
+/**
+ * ESP32-WROOM-32 → HTTP ingest
  *
- * Pins (per project wiring):
+ * Profiles:
+ *   (default)         ICM-42688-P + DHT11 + NEO-6M GPS
+ *   PROFILE_GPS_HALL  霍爾(GPIO36/ADC1_0) + NEO-6M GPS（第二顆 esp32-kart-02）
+ *
+ * Pins:
  *   ICM42688: 3V3, GND, SDA=GPIO21, SCL=GPIO22
  *   DHT11:    VCC, GND, DATA=GPIO15
- *   NEO-6M:   VCC(3V3/5V per module), GND, TXD→GPIO16(UART1 RX), RXD→GPIO17(UART1 TX)
+ *   Hall:     Vcc=3V3, GND, S=GPIO36 (ADC1_CH0)
+ *   NEO-6M:   VCC(3V3/5V), GND, TXD→GPIO16(UART1 RX), RXD→GPIO17(UART1 TX)
+ *             不要接 GPIO1/3 — USB 燒錄腳
  *
- * Offline: RAM ring；NTP 非阻塞；IMU+GPS 採樣在 core1，HTTP 在 loop（core0），
- * 避免 HTTPS 卡住時丟 25Hz 資料或吃滿 GPS UART buffer。
+ * Offline: RAM ring；NTP 非阻塞；採樣在 core1，HTTP 在 loop（core0）。
  */
 
 #include <Arduino.h>
+#ifndef PROFILE_GPS_HALL
 #include <Wire.h>
+#include <DHT.h>
+#endif
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <DHT.h>
 #include <TinyGPSPlus.h>
 #include <math.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
 #include <secrets.h>
+#ifndef PROFILE_GPS_HALL
+#include "DeadReckoner.h"
+#endif
+
+// HTTPS + 大 JSON 在 loop 預設 8KB stack 會爆 canary；拉高再跑 postBatch
+#ifdef PROFILE_GPS_HALL
+SET_LOOP_TASK_STACK_SIZE(12 * 1024);  // GPS+Hall JSON 較小，留 DRAM 給 WiFi
+#else
+SET_LOOP_TASK_STACK_SIZE(24 * 1024);
+#endif
 
 #ifndef WIFI_SSID2
 #define WIFI_SSID2 WIFI_SSID
@@ -30,14 +47,24 @@
 #endif
 
 // ---- Pins ----
+#ifndef PROFILE_GPS_HALL
 static constexpr int PIN_SDA = 21;
 static constexpr int PIN_SCL = 22;
 static constexpr int PIN_DHT = 15;
+#endif
+static constexpr int PIN_HALL = 36;  // ADC1_CH0 / VP
 static constexpr int PIN_GPS_RX = 16;  // ESP32 RX ← NEO-6M TXD
 static constexpr int PIN_GPS_TX = 17;  // ESP32 TX → NEO-6M RXD
 static constexpr uint32_t GPS_BAUD = 9600;
-static constexpr uint32_t GPS_FIX_STALE_MS = 5000;  // 超過視為沒訊號，不隨包送出
+static constexpr uint32_t GPS_FIX_STALE_MS = 5000;
 
+// 數位霍爾：ADC 滯回（未知模組先當開關型；raw 一併上報）
+static constexpr int HALL_ADC_HIGH = 2500;
+static constexpr int HALL_ADC_LOW = 1500;
+static constexpr uint32_t HALL_HZ_WINDOW_MS = 1000;
+static constexpr size_t HALL_PULSE_CAP = 64;
+
+#ifndef PROFILE_GPS_HALL
 // ---- ICM-42688-P (Bank 0) ----
 static constexpr uint8_t ICM_ADDR_LOW = 0x68;
 static constexpr uint8_t ICM_ADDR_HIGH = 0x69;
@@ -50,30 +77,52 @@ static constexpr uint8_t ICM_TEMP_DATA1 = 0x1D;
 
 static constexpr float ACCEL_SENS = 2048.0f;
 static constexpr float GYRO_SENS = 16.4f;
+#endif
 
-static constexpr uint32_t IMU_PERIOD_MS = 40;       // 25 Hz
+static constexpr uint32_t IMU_PERIOD_MS = 40;  // 25 Hz
 static constexpr uint32_t POST_PERIOD_MS = 400;
-static constexpr uint32_t POST_BURST_MS = 50;
+static constexpr uint32_t POST_BURST_MS = 80;
+#ifndef PROFILE_GPS_HALL
 static constexpr uint32_t DHT_PERIOD_MS = 2000;
+#endif
 static constexpr uint32_t NTP_RESYNC_MS = 3600000;
 static constexpr uint32_t NTP_RETRY_MS = 15000;
-static constexpr size_t POST_CHUNK = 50;
-static constexpr size_t RING_CAP = 900;             // ~36s @25Hz（Sample 加 GPS 欄位變大，縮小筆數維持原本 DRAM 用量）
+static constexpr size_t POST_CHUNK = 10;
+#ifdef PROFILE_GPS_HALL
+static constexpr size_t RING_CAP = 150;  // ~6s @25Hz；省 DRAM 給 WiFi/TLS
+#else
+static constexpr size_t RING_CAP = 900;  // ~36s @25Hz
+#endif
 
+#ifndef PROFILE_GPS_HALL
 static DHT dht(PIN_DHT, DHT11);
 static uint8_t icmAddr = ICM_ADDR_LOW;
+static DeadReckoner deadReckoner;
+#endif
 
-static HardwareSerial gpsSerial(1);  // UART1，腳位在 setup() 用 begin() remap 到 16/17
+static HardwareSerial gpsSerial(1);
 static TinyGPSPlus gps;
 
 struct Sample {
+#ifdef PROFILE_GPS_HALL
+  float gps_lat, gps_lon, gps_speed_mps, gps_course_deg, gps_alt_m, gps_hdop;
+  uint32_t gps_satellites;
+  bool has_gps;
+  int hall_adc;
+  float hall_hz;
+  bool has_hall;
+  uint32_t millis_at;
+#else
   float ax, ay, az, gx, gy, gz, imu_temp_c, accel_mag;
   float dht_temp_c, dht_humidity;
   bool has_dht;
   float gps_lat, gps_lon, gps_speed_mps, gps_course_deg, gps_alt_m, gps_hdop;
   uint32_t gps_satellites;
   bool has_gps;
+  float lat_dr, lon_dr, heading_dr_deg, speed_dr_mps;
+  bool has_dr;
   uint32_t millis_at;
+#endif
 };
 
 struct GpsFix {
@@ -86,11 +135,69 @@ struct GpsFix {
 static volatile GpsFix gpsFix{};
 static portMUX_TYPE gpsMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t gpsSentenceCount = 0;
+static char gpsLastSentence[128];
+static portMUX_TYPE gpsSentMux = portMUX_INITIALIZER_UNLOCKED;
+
+static volatile int lastHallAdc = 0;
+static volatile float lastHallHz = 0.0f;
+static bool hallWasHigh = false;
+static uint32_t hallPulseMs[HALL_PULSE_CAP];
+static size_t hallPulseHead = 0;
+static size_t hallPulseCount = 0;
+static portMUX_TYPE hallMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void hallUpdate() {
+  const int adc = analogRead(PIN_HALL);
+  const uint32_t now = millis();
+
+  portENTER_CRITICAL(&hallMux);
+  lastHallAdc = adc;
+
+  if (!hallWasHigh && adc >= HALL_ADC_HIGH) {
+    hallWasHigh = true;
+    hallPulseMs[hallPulseHead] = now;
+    hallPulseHead = (hallPulseHead + 1) % HALL_PULSE_CAP;
+    if (hallPulseCount < HALL_PULSE_CAP) hallPulseCount++;
+  } else if (hallWasHigh && adc <= HALL_ADC_LOW) {
+    hallWasHigh = false;
+  }
+
+  // 滑窗：過去 HALL_HZ_WINDOW_MS 內脈衝數 → Hz
+  size_t n = 0;
+  for (size_t i = 0; i < hallPulseCount; i++) {
+    const size_t idx =
+        (hallPulseHead + HALL_PULSE_CAP - hallPulseCount + i) % HALL_PULSE_CAP;
+    if (now - hallPulseMs[idx] <= HALL_HZ_WINDOW_MS) n++;
+  }
+  lastHallHz = (float)n * (1000.0f / (float)HALL_HZ_WINDOW_MS);
+  portEXIT_CRITICAL(&hallMux);
+}
+
+static void hallSnapshot(int &adc, float &hz) {
+  portENTER_CRITICAL(&hallMux);
+  adc = lastHallAdc;
+  hz = lastHallHz;
+  portEXIT_CRITICAL(&hallMux);
+}
 
 static void gpsPoll() {
+  static char lineBuf[128];
+  static size_t lineLen = 0;
   while (gpsSerial.available()) {
-    if (gps.encode(gpsSerial.read())) {
+    const char c = (char)gpsSerial.read();
+    if (c != '\r' && c != '\n' && lineLen + 1 < sizeof(lineBuf)) {
+      lineBuf[lineLen++] = c;
+    }
+    if (gps.encode(c)) {
       gpsSentenceCount++;
+      if (lineLen > 0) {
+        lineBuf[lineLen] = '\0';
+        portENTER_CRITICAL(&gpsSentMux);
+        strncpy(gpsLastSentence, lineBuf, sizeof(gpsLastSentence) - 1);
+        gpsLastSentence[sizeof(gpsLastSentence) - 1] = '\0';
+        portEXIT_CRITICAL(&gpsSentMux);
+      }
+      lineLen = 0;
       if (gps.location.isValid() && gps.location.age() < GPS_FIX_STALE_MS) {
         portENTER_CRITICAL(&gpsMux);
         gpsFix.lat = (float)gps.location.lat();
@@ -105,7 +212,20 @@ static void gpsPoll() {
         portEXIT_CRITICAL(&gpsMux);
       }
     }
+    if (c == '\n') lineLen = 0;
   }
+}
+
+static const uint8_t UBX_CFG_RATE_5HZ[] = {
+    0xB5, 0x62, 0x06, 0x08, 0x06, 0x00,
+    0xC8, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0xDE, 0x6A,
+};
+
+static void gpsSetRate5Hz() {
+  gpsSerial.write(UBX_CFG_RATE_5HZ, sizeof(UBX_CFG_RATE_5HZ));
+  gpsSerial.flush();
+  Serial.println("[gps] sent UBX-CFG-RATE 5Hz");
 }
 
 static bool gpsSnapshot(GpsFix &out) {
@@ -130,15 +250,16 @@ static size_t ringCount = 0;
 static uint32_t ringDropped = 0;
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 
+#ifndef PROFILE_GPS_HALL
 static volatile float lastDhtTemp = NAN;
 static volatile float lastDhtHum = NAN;
 static volatile bool dhtOk = false;
+static volatile uint32_t imuOkCount = 0;
+static volatile uint32_t imuFailCount = 0;
+#endif
 
 static volatile bool timeOk = false;
 static volatile int64_t millisToUnixOffset = 0;
-
-static volatile uint32_t imuOkCount = 0;
-static volatile uint32_t imuFailCount = 0;
 
 static bool ntpKicked = false;
 static uint32_t ntpKickAt = 0;
@@ -198,7 +319,6 @@ static bool applyUnixTime(time_t unixSec, const char *src) {
   return true;
 }
 
-/** RFC1123: "Wed, 10 Jul 2026 13:05:00 GMT" */
 static bool parseHttpDate(const char *date, time_t *out) {
   int day, year, hour, min, sec;
   char mon[4] = {};
@@ -234,24 +354,20 @@ static String ingestOrigin() {
   return u.substring(0, path + 1);
 }
 
-/** iPhone 熱點常擋 UDP/123；改走 HTTPS Date（跟 ingest 同一條路） */
 static bool syncTimeFromHttpUrl(const String &url) {
-  WiFiClientSecure client;
+  static WiFiClientSecure client;
   client.setInsecure();
+  client.setTimeout(2500);
   HTTPClient http;
-  http.setTimeout(6000);
+  http.setTimeout(3000);
+  http.setConnectTimeout(3000);
   const char *keys[] = {"Date"};
   http.collectHeaders(keys, 1);
 
   if (!http.begin(client, url)) return false;
 
-  int code = http.sendRequest("HEAD");
-  if (code < 0 || !http.hasHeader("Date")) {
-    http.end();
-    if (!http.begin(client, url)) return false;
-    http.collectHeaders(keys, 1);
-    code = http.GET();
-  }
+  // 只做 GET：部分 CDN/熱點對 HEAD 會掛到 WDT
+  int code = http.GET();
 
   bool ok = false;
   if (code > 0 && http.hasHeader("Date")) {
@@ -301,9 +417,9 @@ static void pollTime() {
     return;
   }
 
-  // SNTP 3s 還沒好 → HTTPS Date（熱點常見）
   static uint32_t lastHttpTry = 0;
-  if (millis() - ntpKickAt >= 3000 && millis() - lastHttpTry >= NTP_RETRY_MS) {
+  // SSL 太早打會卡 WDT；給 SNTP 多一點時間
+  if (millis() - ntpKickAt >= 10000 && millis() - lastHttpTry >= NTP_RETRY_MS) {
     lastHttpTry = millis();
     if (syncTimeFromHttp()) return;
   }
@@ -313,6 +429,58 @@ static void pollTime() {
   }
 }
 
+static void attachGpsToSample(Sample &out) {
+  GpsFix fix{};
+  out.has_gps = gpsSnapshot(fix);
+  if (out.has_gps) {
+    out.gps_lat = fix.lat;
+    out.gps_lon = fix.lon;
+    out.gps_speed_mps = fix.speed_mps;
+    out.gps_course_deg = fix.course_deg;
+    out.gps_alt_m = fix.alt_m;
+    out.gps_hdop = fix.hdop;
+    out.gps_satellites = fix.satellites;
+  }
+}
+
+#ifdef PROFILE_GPS_HALL
+static void attachHallToSample(Sample &out) {
+  int adc = 0;
+  float hz = 0;
+  hallSnapshot(adc, hz);
+  out.hall_adc = adc;
+  out.hall_hz = hz;
+  out.has_hall = true;
+}
+
+static void sampleTask(void *) {
+  uint32_t lastSample = 0;
+  uint32_t lastDropLog = 0;
+
+  for (;;) {
+    uint32_t now = millis();
+    gpsPoll();
+    hallUpdate();
+
+    if (now - lastSample >= IMU_PERIOD_MS) {
+      lastSample = now;
+      Sample s{};
+      s.millis_at = now;
+      attachGpsToSample(s);
+      attachHallToSample(s);
+      ringPush(s);
+    }
+
+    if (ringDropped > 0 && now - lastDropLog > 2000) {
+      lastDropLog = now;
+      Serial.printf("[ring] dropped=%lu size=%u\n",
+                    (unsigned long)ringDropped, (unsigned)ringSize());
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+#else
 static bool icmWrite(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(icmAddr);
   Wire.write(reg);
@@ -402,25 +570,17 @@ static bool icmReadSample(Sample &out) {
   out.dht_temp_c = lastDhtTemp;
   out.dht_humidity = lastDhtHum;
 
-  GpsFix fix{};
-  out.has_gps = gpsSnapshot(fix);
-  if (out.has_gps) {
-    out.gps_lat = fix.lat;
-    out.gps_lon = fix.lon;
-    out.gps_speed_mps = fix.speed_mps;
-    out.gps_course_deg = fix.course_deg;
-    out.gps_alt_m = fix.alt_m;
-    out.gps_hdop = fix.hdop;
-    out.gps_satellites = fix.satellites;
-  }
+  attachGpsToSample(out);
   return true;
 }
 
-/** core1：只負責 IMU→ring，不被 HTTP/NTP 堵住 */
 static void sampleTask(void *) {
   uint32_t lastImu = 0;
   uint32_t lastDhtFallback = 0;
   uint32_t lastDropLog = 0;
+  uint32_t lastGpsUpdatedAt = 0;
+  uint32_t lastCalibLog = 0;
+  bool loggedRunning = false;
 
   for (;;) {
     uint32_t now = millis();
@@ -432,6 +592,36 @@ static void sampleTask(void *) {
       Sample s{};
       if (icmReadSample(s)) {
         imuOkCount++;
+
+        GpsFix fix{};
+        if (gpsSnapshot(fix) && fix.updated_at_ms != lastGpsUpdatedAt) {
+          lastGpsUpdatedAt = fix.updated_at_ms;
+          deadReckoner.onGpsFix(fix.updated_at_ms, fix.lat, fix.lon,
+                               fix.speed_mps, fix.course_deg, fix.satellites);
+        }
+
+        const DrOutput dr = deadReckoner.tick(s.millis_at, s.ax, s.ay, s.az,
+                                              s.gx, s.gy, s.gz);
+        s.has_dr = dr.valid;
+        if (dr.valid) {
+          s.lat_dr = dr.lat_dr;
+          s.lon_dr = dr.lon_dr;
+          s.heading_dr_deg = dr.heading_deg;
+          s.speed_dr_mps = dr.speed_mps;
+        }
+
+        if (dr.state == DrState::CALIBRATING) {
+          if (now - lastCalibLog > 1000) {
+            lastCalibLog = now;
+            Serial.printf("[dr] CALIBRATING %u/%d (keep vehicle still)\n",
+                          (unsigned)dr.bias_samples, DR_GYRO_BIAS_SAMPLES);
+          }
+        } else if (!loggedRunning) {
+          loggedRunning = true;
+          Serial.printf("[dr] RUNNING bias_gz=%.4f dps\n",
+                        deadReckoner.gyroBiasDps());
+        }
+
         ringPush(s);
       } else {
         imuFailCount++;
@@ -449,6 +639,8 @@ static void sampleTask(void *) {
           d.gx = d.gy = d.gz = 0;
           d.imu_temp_c = NAN;
           d.accel_mag = 0;
+          d.has_dr = false;
+          attachGpsToSample(d);
           ringPush(d);
           lastDhtFallback = now;
         }
@@ -464,6 +656,7 @@ static void sampleTask(void *) {
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
+#endif
 
 struct WifiCred {
   const char *ssid;
@@ -477,10 +670,11 @@ static const WifiCred WIFI_NETS[] = {
 static constexpr size_t WIFI_NET_COUNT = sizeof(WIFI_NETS) / sizeof(WIFI_NETS[0]);
 static size_t wifiNetIdx = 0;
 
-static bool tryConnectWifi(size_t idx, uint32_t timeoutMs = 15000) {
+static bool tryConnectWifi(size_t idx, uint32_t timeoutMs = 20000) {
   const WifiCred &c = WIFI_NETS[idx % WIFI_NET_COUNT];
-  WiFi.disconnect(false, true);
-  delay(100);
+  WiFi.disconnect(true, true);
+  delay(200);
+  WiFi.setSleep(false);
   WiFi.begin(c.ssid, c.pass);
   Serial.printf("[wifi] connecting to %s", c.ssid);
   uint32_t start = millis();
@@ -491,18 +685,25 @@ static bool tryConnectWifi(size_t idx, uint32_t timeoutMs = 15000) {
   Serial.println();
   if (WiFi.status() == WL_CONNECTED) {
     wifiNetIdx = idx % WIFI_NET_COUNT;
-    Serial.printf("[wifi] ok ssid=%s ip=%s\n", c.ssid, WiFi.localIP().toString().c_str());
+    Serial.printf("[wifi] ok ssid=%s ip=%s rssi=%d\n", c.ssid,
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
     timeOk = false;
     ntpKicked = false;
     kickNtp();
     return true;
   }
-  Serial.printf("[wifi] fail %s\n", c.ssid);
+  Serial.printf("[wifi] fail %s status=%d\n", c.ssid, (int)WiFi.status());
   return false;
 }
 
 static void connectWifi() {
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.mode(WIFI_OFF);
+  delay(200);
   WiFi.mode(WIFI_STA);
+  delay(100);
+  Serial.printf("[wifi] free_heap=%u\n", (unsigned)ESP.getFreeHeap());
   for (size_t i = 0; i < WIFI_NET_COUNT; i++) {
     if (tryConnectWifi((wifiNetIdx + i) % WIFI_NET_COUNT)) return;
   }
@@ -522,22 +723,25 @@ static bool postBatch() {
     Serial.printf("[http] skip (wifi down) ring=%u\n", (unsigned)pending);
     return false;
   }
+  // 沒 NTP/HTTP Date 也照送；省略 ts_ms，後端用收到時間
   if (!timeOk) {
     static uint32_t lastSkipLog = 0;
-    if (millis() - lastSkipLog > 2000) {
+    if (millis() - lastSkipLog > 5000) {
       lastSkipLog = millis();
-      Serial.printf("[http] wait time sync ring=%u\n", (unsigned)pending);
+      Serial.printf("[http] posting without time sync ring=%u\n", (unsigned)pending);
     }
-    return false;
   }
 
-  Sample chunk[POST_CHUNK];
+  static Sample chunk[POST_CHUNK];
   const size_t n = ringSnapshot(chunk, POST_CHUNK);
 
   Serial.printf("[http] posting %u/%u → %s\n",
                 (unsigned)n, (unsigned)pending, INGEST_URL);
 
-  JsonDocument doc;
+  static WiFiClientSecure secureClient;
+  static WiFiClient plainClient;
+  static JsonDocument doc;
+  doc.clear();
   doc["device_id"] = DEVICE_ID;
   if (CAR_ID[0] != '\0') doc["car_id"] = CAR_ID;
   JsonArray samples = doc["samples"].to<JsonArray>();
@@ -545,6 +749,13 @@ static bool postBatch() {
   for (size_t i = 0; i < n; i++) {
     const Sample &s = chunk[i];
     JsonObject o = samples.add<JsonObject>();
+    if (timeOk) o["ts_ms"] = toUnixMs(s.millis_at);
+#ifdef PROFILE_GPS_HALL
+    if (s.has_hall) {
+      o["hall_adc"] = s.hall_adc;
+      o["hall_hz"] = s.hall_hz;
+    }
+#else
     o["ax"] = s.ax;
     o["ay"] = s.ay;
     o["az"] = s.az;
@@ -553,11 +764,11 @@ static bool postBatch() {
     o["gz"] = s.gz;
     o["imu_temp_c"] = s.imu_temp_c;
     o["accel_mag"] = s.accel_mag;
-    o["ts_ms"] = toUnixMs(s.millis_at);
     if (s.has_dht && !isnan(s.dht_temp_c)) {
       o["dht_temp_c"] = s.dht_temp_c;
       o["dht_humidity"] = s.dht_humidity;
     }
+#endif
     if (s.has_gps) {
       o["gps_lat"] = s.gps_lat;
       o["gps_lon"] = s.gps_lon;
@@ -567,17 +778,24 @@ static bool postBatch() {
       if (!isnan(s.gps_hdop)) o["gps_hdop"] = s.gps_hdop;
       o["gps_satellites"] = s.gps_satellites;
     }
+#ifndef PROFILE_GPS_HALL
+    if (s.has_dr) {
+      o["lat_dr"] = s.lat_dr;
+      o["lon_dr"] = s.lon_dr;
+      o["dr_heading_deg"] = s.heading_dr_deg;
+      o["dr_speed_mps"] = s.speed_dr_mps;
+    }
+#endif
   }
 
   String body;
   serializeJson(doc, body);
 
   HTTPClient http;
-  http.setTimeout(8000);
+  http.setTimeout(15000);
+  http.setReuse(false);
 
   const bool isHttps = String(INGEST_URL).startsWith("https://");
-  WiFiClientSecure secureClient;
-  WiFiClient plainClient;
 
   bool began = false;
   if (isHttps) {
@@ -611,16 +829,30 @@ static bool postBatch() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n[boot] ESP32 ICM42688+DHT11 (ring+NTP+core1 sample)");
-  Serial.printf("[boot] ring cap=%u (~%us @25Hz)\n",
-                (unsigned)RING_CAP, (unsigned)(RING_CAP / 25));
+#ifdef PROFILE_GPS_HALL
+  Serial.println("\n[boot] ESP32 GPS+Hall (PROFILE_GPS_HALL)");
+#else
+  Serial.println("\n[boot] ESP32 ICM42688+DHT11+GPS+DR (ring+NTP+core1 sample)");
+  Serial.println("[boot] DR: keep still ~8s for gyro bias (200 samples @25Hz)");
+#endif
+  Serial.printf("[boot] device_id=%s ring cap=%u (~%us @25Hz) heap=%u\n",
+                DEVICE_ID, (unsigned)RING_CAP, (unsigned)(RING_CAP / 25),
+                (unsigned)ESP.getFreeHeap());
 
-  Wire.begin(PIN_SDA, PIN_SCL);
-  Wire.setClock(400000);
+  connectWifi();
+
+  analogSetPinAttenuation(PIN_HALL, ADC_11db);
+  pinMode(PIN_HALL, INPUT);
 
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
   Serial.printf("[gps] UART1 @ %lu baud, rx=%d tx=%d\n",
                 (unsigned long)GPS_BAUD, PIN_GPS_RX, PIN_GPS_TX);
+  delay(100);
+  gpsSetRate5Hz();
+
+#ifndef PROFILE_GPS_HALL
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.setClock(400000);
 
   dht.begin();
   delay(1000);
@@ -630,20 +862,23 @@ void setup() {
   } else {
     Serial.println("[icm] ready ±16g / ±2000dps");
   }
+#else
+  Serial.printf("[hall] ADC GPIO%d high>=%d low<=%d\n",
+                PIN_HALL, HALL_ADC_HIGH, HALL_ADC_LOW);
+#endif
 
-  // 先開採樣再連 WiFi：連線/NTP 期間資料進 ring
   xTaskCreatePinnedToCore(sampleTask, "sample", 4096, nullptr, 1, nullptr, 1);
-
-  connectWifi();
 }
 
 void loop() {
   static uint32_t lastPost = 0;
-  static uint32_t lastDht = 0;
+  static uint32_t lastStat = 0;
   static uint32_t lastWifi = 0;
   static uint32_t lastNtpResync = 0;
+#ifndef PROFILE_GPS_HALL
   static uint32_t lastImuOk = 0;
   static uint32_t lastImuFail = 0;
+#endif
 
   uint32_t now = millis();
 
@@ -661,8 +896,30 @@ void loop() {
     kickNtp();
   }
 
-  if (now - lastDht >= DHT_PERIOD_MS) {
-    lastDht = now;
+  if (now - lastStat >= 2000) {
+    lastStat = now;
+    GpsFix fix{};
+    bool gpsOk = gpsSnapshot(fix);
+    int hallAdc = 0;
+    float hallHz = 0;
+    hallSnapshot(hallAdc, hallHz);
+
+#ifdef PROFILE_GPS_HALL
+    Serial.printf("[stat] ring=%u ntp=%d hall_adc=%d hall_hz=%.1f "
+                  "gps=%d sats=%lu/%lu hdop=%.1f sentences=%lu chars=%lu badck=%lu "
+                  "locValid=%d age=%lu\n",
+                  (unsigned)ringSize(),
+                  timeOk ? 1 : 0, hallAdc, hallHz,
+                  gpsOk ? 1 : 0,
+                  (unsigned long)fix.satellites,
+                  (unsigned long)(gps.satellites.isValid() ? gps.satellites.value() : 0),
+                  gps.hdop.isValid() ? (double)gps.hdop.hdop() : -1.0,
+                  (unsigned long)gpsSentenceCount,
+                  (unsigned long)gps.charsProcessed(),
+                  (unsigned long)gps.failedChecksum(),
+                  gps.location.isValid() ? 1 : 0,
+                  (unsigned long)gps.location.age());
+#else
     float h = dht.readHumidity();
     float t = dht.readTemperature();
     if (!isnan(h) && !isnan(t)) {
@@ -677,15 +934,32 @@ void loop() {
     const uint32_t failDelta = fail - lastImuFail;
     lastImuOk = ok;
     lastImuFail = fail;
-    GpsFix fix{};
-    bool gpsOk = gpsSnapshot(fix);
     Serial.printf("[stat] dht=%.1f/%.1f ring=%u imu_ok=%lu/2s fail=%lu ntp=%d "
-                  "gps=%d sats=%lu hdop=%.1f sentences=%lu\n",
+                  "gps=%d sats=%lu/%lu hdop=%.1f sentences=%lu chars=%lu badck=%lu "
+                  "locValid=%d age=%lu\n",
                   t, h, (unsigned)ringSize(),
                   (unsigned long)okDelta, (unsigned long)failDelta,
                   timeOk ? 1 : 0, gpsOk ? 1 : 0,
-                  (unsigned long)fix.satellites, fix.hdop,
-                  (unsigned long)gpsSentenceCount);
+                  (unsigned long)fix.satellites,
+                  (unsigned long)(gps.satellites.isValid() ? gps.satellites.value() : 0),
+                  gps.hdop.isValid() ? (double)gps.hdop.hdop() : -1.0,
+                  (unsigned long)gpsSentenceCount,
+                  (unsigned long)gps.charsProcessed(),
+                  (unsigned long)gps.failedChecksum(),
+                  gps.location.isValid() ? 1 : 0,
+                  (unsigned long)gps.location.age());
+#endif
+
+    static uint32_t lastNmeaDump = 0;
+    if (now - lastNmeaDump > 10000) {
+      lastNmeaDump = now;
+      char snap[128];
+      portENTER_CRITICAL(&gpsSentMux);
+      strncpy(snap, gpsLastSentence, sizeof(snap) - 1);
+      snap[sizeof(snap) - 1] = '\0';
+      portEXIT_CRITICAL(&gpsSentMux);
+      Serial.printf("[gps-raw] %s\n", snap[0] ? snap : "(none)");
+    }
   }
 
   const size_t pending = ringSize();
@@ -693,6 +967,6 @@ void loop() {
       (pending > POST_CHUNK * 2) ? POST_BURST_MS : POST_PERIOD_MS;
   if (now - lastPost >= postEvery && pending > 0) {
     postBatch();
-    lastPost = millis();  // 用 POST 結束後的時間，避免立刻再送只帶 1 筆
+    lastPost = millis();
   }
 }

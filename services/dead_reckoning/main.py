@@ -39,7 +39,7 @@ def poll_loop(interval_sec: float = POLL_INTERVAL_SEC) -> None:
 
     flux = f'''
 from(bucket:"{BUCKET}")
-  |> range(start: -2s)
+  |> range(start: -60s)
   |> filter(fn: (r) => r._measurement == "{MEASUREMENT_IMU}")
   |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])

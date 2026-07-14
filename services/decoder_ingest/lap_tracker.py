@@ -16,7 +16,8 @@ TIMER_TIMEOUT_SEC = 120.0
 MAX_LAP_TIME_SEC = 600.0
 LAP_HISTORY_MAX = 20
 DEFAULT_CAR_NUMBER_MAP: dict[str, str] = {
-    # 2026-07-12 現場晶片（UID 尾碼會在 6/7/8 漂移，見 normalize_transponder_id）
+    # 現場晶片最後一個 byte（兩個 hex）會漂：68/69/6D/76/77/78…，
+    # 一律經 normalize_transponder_id 收到 …77。
     "14021124C877": "11",
     "140215359577": "12",
     "140210B98377": "13",
@@ -32,14 +33,14 @@ DEFAULT_CAR_NUMBER_MAP: dict[str, str] = {
 
 
 def normalize_transponder_id(transponder_id: str) -> str:
-    """同一實體晶片最後一個 hex nibble 會在 6/7/8 間漂（現場已見 76/77、77/78
-    成對出現）。只把這三個不穩定尾碼收成 canonical ``7``，其餘尾碼不動。
+    """同一實體晶片最後一個 byte 會漂（現場已見 …68 / …6D / …77 / …78）。
+
+    前 10 個 hex 是穩定身份；最後兩碼一律收成 canonical ``77``，才能對上
+    CAR_NUMBER_MAP（無論 .env 寫的是 68、6D 還是 77）。
     """
     tid = transponder_id.upper().strip()
     if len(tid) >= 12 and all(c in "0123456789ABCDEF" for c in tid[:12]):
-        if tid[11] in "678":
-            return tid[:11] + "7"
-        return tid[:12]
+        return tid[:10] + "77"
     return tid
 
 

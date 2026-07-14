@@ -14,8 +14,9 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from influxdb_client import Point
 
@@ -24,7 +25,12 @@ from .lap_tracker import LapTracker
 
 logger = logging.getLogger(__name__)
 
-ResetTrigger = Literal["manual", "auto_idle"]
+ResetTrigger = Literal["manual", "auto_idle", "day_rollover"]
+
+
+def local_date_for(at: datetime, tz_name: str) -> date:
+    dt = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ZoneInfo(tz_name)).date()
 
 
 def _new_session_id(at: datetime | None = None) -> str:
@@ -75,6 +81,15 @@ class SessionManager:
     def idle_seconds(self, *, at: datetime | None = None) -> float:
         now = at or datetime.now(timezone.utc)
         return (now - self.last_activity_at).total_seconds()
+
+    def is_from_previous_local_day(
+        self, tz_name: str, *, at: datetime | None = None
+    ) -> bool:
+        """場次開始日是否早於『現在』的本地日——跨日就該強制收掉再開新節。"""
+        now = at or datetime.now(timezone.utc)
+        return local_date_for(self.session_started_at, tz_name) < local_date_for(
+            now, tz_name
+        )
 
     async def archive_and_reset(
         self,

@@ -16,7 +16,7 @@ from services.decoder_ingest.dashboard import get_session_manager
 
 from .avatars import avatar_url_for
 from .deps import get_current_user, get_db
-from .models import AiCoachReport, CarBinding, User, public_display_name
+from .models import AiCoachReport, CarBinding, RaceSession, User, public_display_name
 
 router = APIRouter()
 
@@ -100,6 +100,23 @@ async def profile_page(
 
     sm = get_session_manager()
     current_session_id = sm.current_session_id if sm is not None else None
+    current_race_session: RaceSession | None = None
+    if current_session_id:
+        current_race_session = await db.get(RaceSession, current_session_id)
+        # 第一筆過線後 sm.numbered=True；若 SQLite 缺號就補一次
+        if (
+            sm is not None
+            and sm.numbered
+            and (current_race_session is None or current_race_session.session_number is None)
+        ):
+            from . import session_numbering
+
+            await session_numbering.ensure_session_numbered(
+                current_session_id, sm.session_started_at
+            )
+            await db.expire_all()
+            current_race_session = await db.get(RaceSession, current_session_id)
+
     current_bindings = [
         b for b in bindings if current_session_id and b.session_id == current_session_id
     ]
@@ -138,6 +155,7 @@ async def profile_page(
             "display_name": public_display_name(user),
             "avatar_url": avatar_url_for(user),
             "current_session_id": current_session_id,
+            "current_race_session": current_race_session,
             "current_bindings": current_bindings,
             "history_bindings": history_bindings,
             "reports_by_key": reports_by_key,

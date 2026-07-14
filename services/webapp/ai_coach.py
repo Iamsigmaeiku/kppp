@@ -20,7 +20,8 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services.decoder_ingest.influx_reader import InfluxReader
+from services.decoder_ingest.dashboard import get_lap_tracker, get_session_manager
+from services.decoder_ingest.influx_reader import InfluxReader, LapRecord
 from services.decoder_ingest.lap_tracker import normalize_transponder_id
 
 from .config import AiCoachConfig
@@ -30,6 +31,45 @@ from .models import AiCoachReport, CarBinding, User, public_display_name
 
 def _tids_equivalent(a: str, b: str) -> bool:
     return normalize_transponder_id(a) == normalize_transponder_id(b)
+
+
+def _laps_from_live_tracker(session_id: str, transponder_id: str) -> list[LapRecord]:
+    """本節尚未刷進 Influx / 尚未歸檔時，直接從記憶體 lap_tracker 取圈速。"""
+    from datetime import datetime, timezone
+
+    sm = get_session_manager()
+    lt = get_lap_tracker()
+    if sm is None or lt is None:
+        return []
+    if sm.current_session_id != session_id:
+        return []
+    now = datetime.now(timezone.utc)
+    for state in lt.all_states():
+        tid = state.get("transponder_id") or ""
+        if not _tids_equivalent(tid, transponder_id):
+            continue
+        history = state.get("lap_history") or []
+        return [
+            LapRecord(lap_number=i + 1, lap_time=float(t), recorded_at=now)
+            for i, t in enumerate(history)
+            if t and float(t) > 0
+        ]
+    return []
+
+
+async def _load_laps(
+    reader: InfluxReader, session_id: str, transponder_id: str
+) -> list[LapRecord]:
+    try:
+        laps = await reader.get_lap_history(session_id, transponder_id)
+        if laps:
+            return laps
+    except Exception:
+        logger.exception(
+            "ai_coach: Influx lap history failed; trying live tracker session_id=%s",
+            session_id,
+        )
+    return _laps_from_live_tracker(session_id, transponder_id)
 
 
 logger = logging.getLogger(__name__)
@@ -255,7 +295,7 @@ async def _run_report_job(
         if ai_config is None:
             raise RuntimeError("AI coach 尚未設定")
 
-        laps = await reader.get_lap_history(session_id, transponder_id)
+        laps = await _load_laps(reader, session_id, transponder_id)
         summary_rows = await reader.get_session_summary(session_id)
         if not laps:
             raise ValueError("這節還沒有任何完整的圈速資料")
@@ -359,7 +399,7 @@ async def generate_report(
 
     reader: InfluxReader = request.app.state.influx_reader
     try:
-        laps = await reader.get_lap_history(body.session_id, transponder_id)
+        laps = await _load_laps(reader, body.session_id, transponder_id)
     except Exception as exc:
         logger.exception(
             "ai_coach: failed to read from InfluxDB (session_id=%s transponder_id=%s)",

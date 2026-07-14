@@ -50,7 +50,7 @@ class RaceSession(Base):
     存給 UI/綁定用的中繼資料，圈速本身的權威資料仍在 InfluxDB。
 
     session_date/session_number 是給人看的「今天第幾節」標籤（見
-    session_numbering.py），每天從 #1 重新開始、最多到 #100 循環——這只是
+    session_numbering.py），每天從 #1 重新開始、最多到 #10——這只是
     可重複使用的顯示用短標籤，不是永久唯一 ID，真正的資料一律還是用
     session_id（不會重複的 sess-YYYYMMDD-HHMMSS）對應。
     """
