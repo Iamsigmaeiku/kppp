@@ -1,4 +1,4 @@
-"""Normalize UID last nibble; first-lap session numbering."""
+"""Normalize UID last byte drift; map lookup via canonical …77."""
 
 from __future__ import annotations
 
@@ -8,12 +8,34 @@ from services.decoder_ingest.lap_tracker import LapTracker, normalize_transponde
 from services.decoder_ingest.packet_parser import PassingEvent
 
 
-def test_normalize_transponder_id_collapses_trailing_nibble():
+def test_normalize_transponder_id_collapses_trailing_byte():
     assert normalize_transponder_id("140211241C78") == "140211241C77"
     assert normalize_transponder_id("140211241c76") == "140211241C77"
     assert normalize_transponder_id("140211241C77") == "140211241C77"
-    # 非 6/7/8 尾碼不碰（測試用假 UID）
-    assert normalize_transponder_id("AABBCCDDEEFF") == "AABBCCDDEEFF"
+    # .env 現場曾寫 …6D / …68 / …69 —— 必須對上 …77 字典
+    assert normalize_transponder_id("14021124C86D") == "14021124C877"
+    assert normalize_transponder_id("140210B98368") == "140210B98377"
+    assert normalize_transponder_id("140210998E69") == "140210998E77"
+    # 非 12-hex 身份不動
+    assert normalize_transponder_id("SHORT") == "SHORT"
+
+
+def test_env_style_68_maps_to_car_number():
+    tracker = LapTracker(
+        noise_threshold_sec=1.0,
+        car_number_map={"14021124C86D": "11"},  # .env 舊寫法
+    )
+    t0 = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    state = tracker.record_passing(
+        PassingEvent(
+            transponder_id="14021124C877",  # decoder 實際過線
+            raw_payload="14021124C8770000",
+            received_at=t0,
+        )
+    )
+    assert state["registered"] is True
+    assert state["car_number"] == "11"
+    assert state["transponder_id"] == "14021124C877"
 
 
 def test_77_and_78_share_state_and_car_number():

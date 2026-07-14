@@ -52,6 +52,13 @@ Attitude EKF（IMU → `attitude` measurement，另開一個 terminal）：
 .venv\Scripts\python -m services.attitude_ekf.main
 ```
 
+Dead Reckoning：Grafana 賽道走線主圖已改吃 ESP 韌體寫入的 `dr_position`（不需跑 Pi service）。
+可選對照（舊 Pi 路徑 → `position_est`）：
+
+```powershell
+.venv\Scripts\python -m services.dead_reckoning.main
+```
+
 賽道彎道標記（本機互動，需 GUI）：
 
 ```powershell

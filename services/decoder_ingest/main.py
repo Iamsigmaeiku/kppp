@@ -189,6 +189,34 @@ async def handle_feed_result(
                     )
                     if number is not None:
                         session_manager.numbered = True
+                        if with_dashboard:
+                            session_date = None
+                            try:
+                                from zoneinfo import ZoneInfo
+
+                                from services.webapp.app import app as web_app
+
+                                tz_name = getattr(
+                                    getattr(web_app.state, "web_config", None),
+                                    "display_timezone",
+                                    None,
+                                )
+                                if tz_name:
+                                    at = session_manager.session_started_at
+                                    if at.tzinfo is None:
+                                        at = at.replace(tzinfo=timezone.utc)
+                                    session_date = (
+                                        at.astimezone(ZoneInfo(tz_name))
+                                        .date()
+                                        .isoformat()
+                                    )
+                            except Exception:
+                                session_date = None
+                            await broadcast_session_info(
+                                session_manager.current_session_id,
+                                session_number=number,
+                                session_date=session_date,
+                            )
                 except Exception:
                     logger.exception(
                         "ensure_session_numbered failed for %s",
@@ -236,24 +264,144 @@ async def handle_feed_result(
 
 async def _on_new_session_started(session_manager: SessionManager) -> None:
     """新場次真的開始了（服務啟動的第一節、或 archive_and_reset 換發新
-    session_id 後）都要呼叫一次：讓前端知道目前的 session_id（供「每一圈
-    的圈時」展開明細查詢），並讓 webapp 有機會補上場次每日編號（見
-    dashboard.py 的 set_session_started_hook/session_numbering.py）。
-    webapp 那端若失敗（例如 SQLite 暫時打不開），不該讓這裡的場次重置
-    流程整個掛掉，所以包一層 try/except 只記警告。
+    session_id 後）都要呼叫一次：讓 webapp 佔「第 N 節」號，並廣播給前端
+    （即時面板立刻顯示節次，不要退回裸 sess-…）。
     """
-    await broadcast_session_info(session_manager.current_session_id)
+    number: int | None = None
+    session_date: str | None = None
     hook = get_session_started_hook()
     if hook is not None:
         try:
-            await hook(
+            result = await hook(
+                session_manager.current_session_id,
+                session_manager.session_started_at,
+            )
+            if isinstance(result, int):
+                number = result
+        except Exception:
+            logger.exception(
+                "session_started hook failed (webapp session numbering); continuing"
+            )
+    if number is None:
+        try:
+            from services.webapp import session_numbering
+
+            number = await session_numbering.ensure_session_numbered(
                 session_manager.current_session_id,
                 session_manager.session_started_at,
             )
         except Exception:
             logger.exception(
-                "session_started hook failed (webapp session numbering); continuing"
+                "ensure_session_numbered on new session failed for %s",
+                session_manager.current_session_id,
             )
+    if number is not None:
+        session_manager.numbered = True
+        try:
+            from services.webapp.app import app as web_app
+            from services.webapp.session_numbering import local_date_iso
+
+            tz_name = getattr(
+                getattr(web_app.state, "web_config", None),
+                "display_timezone",
+                None,
+            ) or "Asia/Taipei"
+            session_date = local_date_iso(
+                session_manager.session_started_at, tz_name
+            )
+        except Exception:
+            session_date = None
+    await broadcast_session_info(
+        session_manager.current_session_id,
+        session_number=number,
+        session_date=session_date,
+    )
+
+
+async def _roll_session_if_new_local_day(
+    session_manager: SessionManager,
+    lap_tracker: LapTracker,
+    writer: InfluxWriter | None,
+    *,
+    tz_name: str,
+    with_dashboard: bool = False,
+) -> bool:
+    """跨本地日：強制歸檔（有成績才寫 Influx）並換新 session_id。
+
+    歷史 bug：昨晚第 9 節空著沒過線、snapshot 卻還掛著 → 隔天早上即時面板
+    仍顯示「第 9 節（昨天）」。auto_idle 又要求 has_archivable_results，空節
+    永遠不會被收掉。這裡不看有沒有成績，只要日期過了就換。
+    """
+    if not session_manager.is_from_previous_local_day(tz_name):
+        return False
+
+    archived_id = session_manager.current_session_id
+    archived_started = session_manager.session_started_at
+    logger.info(
+        "day-rollover: archiving stale session_id=%s started=%s",
+        archived_id,
+        archived_started.isoformat(),
+    )
+    if writer is not None:
+        await session_manager.archive_and_reset(
+            lap_tracker, writer, trigger="day_rollover"
+        )
+    else:
+        lap_tracker.reset_session()
+        fresh = SessionManager.start_new()
+        session_manager.current_session_id = fresh.current_session_id
+        session_manager.session_started_at = fresh.session_started_at
+        session_manager.last_activity_at = fresh.last_activity_at
+        session_manager.numbered = False
+
+    try:
+        from services.webapp import session_numbering
+
+        await session_numbering.ensure_session_numbered(archived_id, archived_started)
+    except Exception:
+        logger.exception(
+            "ensure_session_numbered on day-rollover failed for %s", archived_id
+        )
+
+    on_reset = get_reset_hook()
+    if on_reset is not None:
+        on_reset()
+    if with_dashboard:
+        await _on_new_session_started(session_manager)
+        await broadcast_session_reset(
+            reset_at=datetime.now(timezone.utc).isoformat()
+        )
+    return True
+
+
+async def _discard_stale_snapshot_session(
+    lap_tracker: LapTracker,
+    session_manager: SessionManager,
+    snapshot_path: Path,
+    *,
+    tz_name: str,
+) -> SessionManager:
+    """啟動時若 snapshot 是昨天的**空**場次：丟掉、發今天新 session_id。
+
+    有可歸檔成績的隔夜場次留給 writer ready 後的 day-rollover 走完整 archive。
+    """
+    if not session_manager.is_from_previous_local_day(tz_name):
+        return session_manager
+    if lap_tracker.has_archivable_results():
+        logger.warning(
+            "snapshot session_id=%s is from previous local day but has results; "
+            "deferring to day-rollover archive",
+            session_manager.current_session_id,
+        )
+        return session_manager
+    logger.warning(
+        "discarding empty snapshot session_id=%s from previous local day; starting fresh",
+        session_manager.current_session_id,
+    )
+    lap_tracker.reset_session()
+    session_manager = SessionManager.start_new()
+    write_snapshot(lap_tracker, session_manager, snapshot_path)
+    return session_manager
 
 
 async def lap_timer_broadcast_loop(
@@ -264,6 +412,7 @@ async def lap_timer_broadcast_loop(
     writer: InfluxWriter | None = None,
     auto_archive_idle_sec: float | None = None,
     auto_archive_all_frozen_sec: float | None = None,
+    display_timezone: str = "Asia/Taipei",
 ) -> None:
     """每秒推送本圈計時；逾時或 decoder 斷線時凍結。
 
@@ -271,8 +420,18 @@ async def lap_timer_broadcast_loop(
     1. 完全閒置 >= AUTO_ARCHIVE_IDLE_SEC（安全網）
     2. 全車本圈已暫停 且 閒置 >= AUTO_ARCHIVE_ALL_FROZEN_SEC
        （場次實質結束：車都停了不必再等半小時才進第七節）
+    3. 跨本地日（不論有沒有成績）→ day_rollover
     """
     while not stop_event.is_set():
+        if session_manager is not None:
+            await _roll_session_if_new_local_day(
+                session_manager,
+                lap_tracker,
+                writer,
+                tz_name=display_timezone,
+                with_dashboard=True,
+            )
+
         states = lap_tracker.all_states()
         for state in states:
             await broadcast_lap_update(state)
@@ -601,6 +760,13 @@ async def run_service(
         # 的無 session_id 舊檔，避免下次啟動又警告一次。
         session_manager = SessionManager.start_new()
         write_snapshot(lap_tracker, session_manager, config.snapshot_path)
+    display_tz = os.getenv("DISPLAY_TIMEZONE", "Asia/Taipei").strip() or "Asia/Taipei"
+    session_manager = await _discard_stale_snapshot_session(
+        lap_tracker,
+        session_manager,
+        config.snapshot_path,
+        tz_name=display_tz,
+    )
     writer = InfluxWriter(
         InfluxWriterConfig(
             url=config.influx.url,
@@ -660,6 +826,14 @@ async def run_service(
         # middleware；dashboard_app 和 webapp 的 app 是同一個 FastAPI
         # instance（見 services/webapp/app.py），這裡只是把它組裝完整。
         configure_app()
+        # 隔夜 snapshot 若還掛著昨天場次（含有成績），writer 已就绪後立刻換日。
+        await _roll_session_if_new_local_day(
+            session_manager,
+            lap_tracker,
+            writer,
+            tz_name=display_tz,
+            with_dashboard=True,
+        )
         # 服務啟動時的第一節場次也要走一次「新場次開始」通知，
         # 否則要等到第一次 auto_idle 重置才會第一次被編號/廣播 session_id。
         await _on_new_session_started(session_manager)
@@ -686,6 +860,7 @@ async def run_service(
                     writer=writer,
                     auto_archive_idle_sec=config.auto_archive_idle_sec,
                     auto_archive_all_frozen_sec=config.auto_archive_all_frozen_sec,
+                    display_timezone=display_tz,
                 ),
                 name="lap-timer-broadcast",
             )

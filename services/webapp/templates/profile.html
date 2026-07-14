@@ -292,8 +292,20 @@
 {% endmacro %}
 
 <div class="panel">
-  <div class="panel-header">本節綁定{% if current_session_id %} · {{ current_session_id }}{% endif %}</div>
+  <div class="panel-header">
+    本節綁定
+    {% if current_race_session and current_race_session.session_number %}
+    · 第 {{ current_race_session.session_number }} 節（{{ current_race_session.session_date }}）
+    {% elif current_session_id %}
+    · {{ current_session_id }}
+    {% endif %}
+  </div>
   {{ binding_rows(current_bindings, "本節尚未綁定。請用下方表單綁定——上一節的車號不會自動帶過來。") }}
+  {% if current_bindings %}
+  <div class="panel-footer-hint">
+    跑完、本圈計時暫停後，到「即時面板」按<strong>歸檔本節</strong>，這節會進「歷史綁定」，即可產生 AI 教練報告。
+  </div>
+  {% endif %}
 </div>
 
 <div class="panel" id="bind-form">

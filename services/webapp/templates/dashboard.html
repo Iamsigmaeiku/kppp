@@ -5,8 +5,26 @@
 
 {% block content %}
 <div class="dash-toolbar">
+  <div id="sessionBadge" class="session-badge" title="">
+    <span class="session-label">本節載入中…</span>
+  </div>
+  <button id="archiveBtn" class="btn btn-primary archive-btn" type="button" style="display:none;" disabled>
+    歸檔本節
+  </button>
   <div id="unregisteredBadge"><span>⚠</span><span class="label">0 未配對</span></div>
   <div id="status"><span class="dot"></span><span class="label">連線中…</span></div>
+</div>
+
+<div id="archiveBanner" class="archive-banner" style="display:none;" role="status">
+  <div class="archive-banner-body">
+    <strong id="archiveBannerTitle">本節已歸檔</strong>
+    <span id="archiveBannerDetail"></span>
+  </div>
+  <div class="archive-banner-actions">
+    <a id="archiveSessionLink" class="btn btn-primary" href="/sessions">看場次</a>
+    <a class="btn" href="/profile">產生 AI 教練報告 →</a>
+    <button type="button" class="btn" id="archiveBannerDismiss">關閉</button>
+  </div>
 </div>
 
 <div class="panel">
@@ -55,6 +73,13 @@
   const rows = document.getElementById("rows");
   const statusEl = document.getElementById("status");
   const statusLabel = statusEl.querySelector(".label");
+  const sessionBadge = document.getElementById("sessionBadge");
+  const sessionLabelEl = sessionBadge.querySelector(".session-label");
+  const archiveBtn = document.getElementById("archiveBtn");
+  const archiveBanner = document.getElementById("archiveBanner");
+  const archiveBannerTitle = document.getElementById("archiveBannerTitle");
+  const archiveBannerDetail = document.getElementById("archiveBannerDetail");
+  const archiveSessionLink = document.getElementById("archiveSessionLink");
   const capturesEl = document.getElementById("captures");
   const captureMetaEl = document.getElementById("captureMeta");
   const unregisteredBadge = document.getElementById("unregisteredBadge");
@@ -70,6 +95,108 @@
   // （見 dashboard.py 的 session_info 訊息），用來查詢「每一圈的圈時」
   // 展開明細（GET /api/sessions/{session_id}/laps/{transponder_id}）。
   let currentSessionId = null;
+  let currentSessionNumber = null;
+  let currentSessionDate = null;
+  let archiveBusy = false;
+
+  function sessionDisplayLabel() {
+    if (currentSessionNumber != null) {
+      const dateBit = currentSessionDate ? `（${currentSessionDate}）` : "";
+      return `第 ${currentSessionNumber} 節${dateBit}`;
+    }
+    return currentSessionId || "本節載入中…";
+  }
+
+  function updateSessionBadge() {
+    sessionLabelEl.textContent = sessionDisplayLabel();
+    sessionBadge.title = currentSessionId || "";
+    sessionBadge.classList.toggle("numbered", currentSessionNumber != null);
+  }
+
+  function anyTimerPausedWithLaps() {
+    let hasLaps = false;
+    let allPaused = true;
+    let any = false;
+    for (const s of state.values()) {
+      if ((s.lap_count || 0) <= 0 && !(s.best_lap_time > 0)) continue;
+      any = true;
+      hasLaps = true;
+      if (s.timer_active !== false) allPaused = false;
+    }
+    return { hasLaps, allPaused: any && allPaused };
+  }
+
+  function updateArchiveButton() {
+    const { hasLaps, allPaused } = anyTimerPausedWithLaps();
+    archiveBtn.style.display = hasLaps ? "" : "none";
+    archiveBtn.disabled = archiveBusy || !hasLaps;
+    if (!hasLaps) {
+      archiveBtn.textContent = "歸檔本節";
+      return;
+    }
+    if (archiveBusy) {
+      archiveBtn.textContent = "歸檔中…";
+      return;
+    }
+    archiveBtn.textContent = allPaused ? "本節已暫停 · 歸檔" : "歸檔本節（結束）";
+    archiveBtn.classList.toggle("ready", allPaused);
+  }
+
+  async function refreshSessionMeta() {
+    try {
+      const r = await fetch("/api/session/current");
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.session_id) currentSessionId = d.session_id;
+      currentSessionNumber = d.session_number ?? null;
+      currentSessionDate = d.session_date ?? null;
+      updateSessionBadge();
+      updateArchiveButton();
+    } catch (e) {}
+  }
+
+  archiveBtn.addEventListener("click", async () => {
+    if (archiveBusy) return;
+    const label = sessionDisplayLabel();
+    if (!confirm(`確定歸檔「${label}」？\n歸檔後即時面板會清空，可到「我的資料」產生 AI 教練報告。`)) {
+      return;
+    }
+    archiveBusy = true;
+    updateArchiveButton();
+    try {
+      const r = await fetch("/api/session/archive", { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const detail = d.detail;
+        throw new Error(
+          typeof detail === "string" ? detail
+            : (detail && detail.message) || ("歸檔失敗 (" + r.status + ")")
+        );
+      }
+      const archived = d.archived || {};
+      const nice = archived.label || archived.session_id || "本節";
+      archiveBannerTitle.textContent = `${nice} 已歸檔`;
+      archiveBannerDetail.textContent = archived.session_id
+        ? `（${archived.session_id}）— 可產生 AI 教練報告`
+        : "可到「我的資料」產生 AI 教練報告";
+      archiveSessionLink.href = d.session_url || "/sessions";
+      archiveBanner.style.display = "";
+      currentSessionId = d.new_session_id || null;
+      currentSessionNumber = null;
+      currentSessionDate = null;
+      updateSessionBadge();
+      await refreshSessionMeta();
+    } catch (e) {
+      alert(e.message || String(e));
+    } finally {
+      archiveBusy = false;
+      updateArchiveButton();
+    }
+  });
+
+  document.getElementById("archiveBannerDismiss").addEventListener("click", () => {
+    archiveBanner.style.display = "none";
+  });
 
   function fmtLastSeen(iso) {
     if (!iso) return "—";
@@ -245,6 +372,7 @@
     });
 
     renderUnregistered();
+    updateArchiveButton();
   }
 
   // 每一圈的圈時展開明細：點「展開」時才 fetch 一次並快取，之後只有
@@ -393,10 +521,14 @@
       rows.innerHTML = "";
       lapsCache.clear();
       currentSessionId = null;
+      currentSessionNumber = null;
+      currentSessionDate = null;
+      updateSessionBadge();
       decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
       statusLabel.textContent = "已連線 · 同步中…";
       statusEl.className = "warn";
       updateStatus();
+      refreshSessionMeta();
     };
 
     ws.onclose = () => {
@@ -420,13 +552,21 @@
       }
       if (data.type === "session_info") {
         currentSessionId = data.session_id;
+        if (data.session_number != null) currentSessionNumber = data.session_number;
+        if (data.session_date != null) currentSessionDate = data.session_date;
+        updateSessionBadge();
+        // WS 剛連上可能還沒有 number；補一次 REST
+        if (currentSessionNumber == null) refreshSessionMeta();
         return;
       }
       if (data.type === "session_reset") {
         state.clear();
         rows.innerHTML = "";
         lapsCache.clear();
+        currentSessionNumber = null;
+        currentSessionDate = null;
         render();
+        refreshSessionMeta();
         return;
       }
       data._recvPerf = performance.now();

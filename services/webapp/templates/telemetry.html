@@ -24,6 +24,16 @@
   }
   .telemetry-status .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(52, 211, 153, 0.45); }
   .telemetry-status .dot.warn { background: var(--warn); }
+  .telemetry-device-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: center;
+    width: 100%;
+    padding: 0.35rem 0;
+    border-top: 1px solid var(--border);
+  }
+  .telemetry-device-row:first-of-type { border-top: 0; padding-top: 0; }
   .telemetry-frame-wrap {
     position: relative;
     width: 100%;
@@ -48,7 +58,7 @@
 
 {% block content %}
 <div class="panel" style="padding:1rem 1.1rem 1.15rem;">
-  <div class="panel-header" style="margin-bottom:0.75rem;">卡丁車 IMU / 環境感測（ICM-42688 + DHT11）</div>
+  <div class="panel-header" style="margin-bottom:0.75rem;">卡丁車遙測（IMU / DHT / GPS / 霍爾）</div>
   <div class="telemetry-status" id="telemetryStatus"
        x-data="telemetryStatus()"
        x-init="poll()">
@@ -56,15 +66,38 @@
       <span class="dot" :class="online ? 'ok' : 'warn'"></span>
       <span x-text="online ? 'ESP32 有資料流入' : '等待 ESP32 資料…'"></span>
     </span>
-    <span x-show="last" x-cloak>
-      裝置 <code x-text="last?.device_id || '—'"></code>
-      · 更新 <span x-text="last?.received_at || '—'"></span>
-    </span>
-    <span x-show="last?.sample" x-cloak>
-      |a|=<span x-text="fmt(last?.sample?.accel_mag)"></span>g
-      · DHT <span x-text="fmt(last?.sample?.dht_temp_c)"></span>°C /
-      <span x-text="fmt(last?.sample?.dht_humidity)"></span>%RH
-    </span>
+    <template x-for="dev in deviceList" :key="dev.device_id">
+      <div class="telemetry-device-row">
+        <span>
+          <span class="dot" :class="isFresh(dev) ? 'ok' : 'warn'"></span>
+          <code x-text="dev.device_id"></code>
+          · <span x-text="dev.received_at || '—'"></span>
+        </span>
+        <span x-show="dev.sample?.accel_mag != null || dev.sample?.dht_temp_c != null" x-cloak>
+          |a|=<span x-text="fmt(dev.sample?.accel_mag)"></span>g
+          · DHT <span x-text="fmt(dev.sample?.dht_temp_c)"></span>°C /
+          <span x-text="fmt(dev.sample?.dht_humidity)"></span>%RH
+        </span>
+        <span x-show="dev.sample?.hall_adc != null || dev.sample?.hall_hz != null" x-cloak>
+          霍爾 ADC <span x-text="fmt(dev.sample?.hall_adc, 0)"></span>
+          · <span x-text="fmt(dev.sample?.hall_hz)"></span> Hz
+        </span>
+        <span>
+          <span class="dot" :class="hasGpsFix(dev) ? 'ok' : 'warn'"></span>
+          <template x-if="hasGpsFix(dev)">
+            <span>
+              GPS <span x-text="fmt(dev.sample?.gps_lat, 5)"></span>,
+              <span x-text="fmt(dev.sample?.gps_lon, 5)"></span>
+              · <span x-text="fmt(dev.sample?.gps_speed_mps)"></span>m/s
+              · <span x-text="dev.sample?.gps_satellites ?? '—'"></span>顆衛星
+            </span>
+          </template>
+          <template x-if="!hasGpsFix(dev)">
+            <span>GPS 尚未定位</span>
+          </template>
+        </span>
+      </div>
+    </template>
   </div>
   <div class="telemetry-frame-wrap">
     {% if grafana_embed_url %}
@@ -87,10 +120,29 @@
 function telemetryStatus() {
   return {
     last: null,
+    devices: {},
     online: false,
-    fmt(v) {
+    get deviceList() {
+      const entries = Object.values(this.devices || {});
+      if (entries.length) {
+        return entries.sort((a, b) =>
+          String(a.device_id || '').localeCompare(String(b.device_id || '')));
+      }
+      return this.last ? [this.last] : [];
+    },
+    hasGpsFix(dev) {
+      const lat = dev?.sample?.gps_lat;
+      const lon = dev?.sample?.gps_lon;
+      return typeof lat === 'number' && typeof lon === 'number';
+    },
+    isFresh(dev) {
+      if (!dev?.received_at) return false;
+      const age = Date.now() - Date.parse(dev.received_at);
+      return Number.isFinite(age) && age < 15000;
+    },
+    fmt(v, decimals = 2) {
       if (v === null || v === undefined || Number.isNaN(v)) return '—';
-      return Number(v).toFixed(2);
+      return Number(v).toFixed(decimals);
     },
     async poll() {
       const tick = async () => {
@@ -99,12 +151,9 @@ function telemetryStatus() {
           if (!r.ok) return;
           const d = await r.json();
           this.last = d.last;
-          if (d.last?.received_at) {
-            const age = Date.now() - Date.parse(d.last.received_at);
-            this.online = Number.isFinite(age) && age < 15000;
-          } else {
-            this.online = false;
-          }
+          this.devices = d.devices || {};
+          const anyFresh = this.deviceList.some((dev) => this.isFresh(dev));
+          this.online = anyFresh;
         } catch (_) { /* ignore */ }
       };
       await tick();

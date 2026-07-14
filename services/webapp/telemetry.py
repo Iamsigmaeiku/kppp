@@ -1,4 +1,7 @@
-"""ESP32 遙測 ingest：Bearer token 驗證後寫入 InfluxDB measurement kart_telemetry。"""
+"""ESP32 遙測 ingest：Bearer token 驗證後寫入 InfluxDB measurement kart_telemetry。
+
+若 sample 含 DR 欄位，另寫 measurement dr_position（不覆蓋 gps_* raw）。
+"""
 
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/telemetry")
 
 MEASUREMENT = "kart_telemetry"
+MEASUREMENT_DR = "dr_position"
 
 
 class TelemetrySample(BaseModel):
@@ -37,6 +41,12 @@ class TelemetrySample(BaseModel):
     gps_alt_m: float | None = None
     gps_hdop: float | None = None
     gps_satellites: int | None = None
+    hall_adc: float | None = None
+    hall_hz: float | None = None
+    lat_dr: float | None = None
+    lon_dr: float | None = None
+    dr_heading_deg: float | None = None
+    dr_speed_mps: float | None = None
     ts_ms: int | None = None
 
 
@@ -55,6 +65,12 @@ def _require_ingest_token(request: Request, authorization: str | None) -> None:
     token = authorization.removeprefix("Bearer ").strip()
     if token != expected:
         raise HTTPException(status_code=401, detail="invalid token")
+
+
+def _sample_time(sample: TelemetrySample) -> datetime:
+    if sample.ts_ms is not None:
+        return datetime.fromtimestamp(sample.ts_ms / 1000.0, tz=timezone.utc)
+    return datetime.now(timezone.utc)
 
 
 def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample) -> Point:
@@ -79,6 +95,8 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
         "gps_alt_m": sample.gps_alt_m,
         "gps_hdop": sample.gps_hdop,
         "gps_satellites": sample.gps_satellites,
+        "hall_adc": sample.hall_adc,
+        "hall_hz": sample.hall_hz,
     }
     accel_mag = sample.accel_mag
     if accel_mag is None and sample.ax is not None and sample.ay is not None and sample.az is not None:
@@ -92,11 +110,25 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
     if sample.gps_lat is not None and sample.gps_lon is not None:
         point = point.tag("gps_fix", "1")
 
-    if sample.ts_ms is not None:
-        point = point.time(datetime.fromtimestamp(sample.ts_ms / 1000.0, tz=timezone.utc))
-    else:
-        point = point.time(datetime.now(timezone.utc))
-    return point
+    return point.time(_sample_time(sample))
+
+
+def _sample_to_dr_point(
+    device_id: str, car_id: str | None, sample: TelemetrySample
+) -> Point | None:
+    if sample.lat_dr is None or sample.lon_dr is None:
+        return None
+    point = Point(MEASUREMENT_DR).tag("device_id", device_id)
+    if car_id:
+        point = point.tag("car_id", car_id)
+    point = point.field("lat_dr", float(sample.lat_dr)).field(
+        "lon_dr", float(sample.lon_dr)
+    )
+    if sample.dr_heading_deg is not None:
+        point = point.field("heading_deg", float(sample.dr_heading_deg))
+    if sample.dr_speed_mps is not None:
+        point = point.field("speed_mps", float(sample.dr_speed_mps))
+    return point.time(_sample_time(sample))
 
 
 @router.post("/ingest")
@@ -108,7 +140,12 @@ async def ingest_telemetry(
     _require_ingest_token(request, authorization)
 
     influx_cfg = request.app.state.influx_reader._config
-    points = [_sample_to_point(body.device_id, body.car_id, s) for s in body.samples]
+    points: list[Point] = []
+    for s in body.samples:
+        points.append(_sample_to_point(body.device_id, body.car_id, s))
+        dr_pt = _sample_to_dr_point(body.device_id, body.car_id, s)
+        if dr_pt is not None:
+            points.append(dr_pt)
 
     client = InfluxDBClientAsync(
         url=influx_cfg.url, token=influx_cfg.token, org=influx_cfg.org
@@ -122,14 +159,20 @@ async def ingest_telemetry(
     finally:
         await client.close()
 
-    # 快取最後一包，給 /telemetry 狀態列用
+    # 快取最後一包（全域 + per-device），給 /telemetry 狀態列用
     last = body.samples[-1]
-    request.app.state.telemetry_last = {
+    entry = {
         "device_id": body.device_id,
         "car_id": body.car_id,
         "received_at": datetime.now(timezone.utc).isoformat(),
         "sample": last.model_dump(),
     }
+    request.app.state.telemetry_last = entry
+    by_device = getattr(request.app.state, "telemetry_by_device", None)
+    if not isinstance(by_device, dict):
+        by_device = {}
+        request.app.state.telemetry_by_device = by_device
+    by_device[body.device_id] = entry
 
     return {"status": "ok", "written": len(points)}
 
@@ -137,4 +180,6 @@ async def ingest_telemetry(
 @router.get("/status")
 async def telemetry_status(request: Request) -> dict:
     last = getattr(request.app.state, "telemetry_last", None)
-    return {"last": last}
+    by_device = getattr(request.app.state, "telemetry_by_device", None)
+    devices = by_device if isinstance(by_device, dict) else {}
+    return {"last": last, "devices": devices}
