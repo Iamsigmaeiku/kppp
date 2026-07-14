@@ -1,5 +1,6 @@
 .env
 services/decoder_ingest/raw_capture.log
+services/decoder_ingest/session_snapshot.json
 services/decoder_ingest/influx_fallback.ndjson
 __pycache__/
 *.pyc
@@ -11,3 +12,4 @@ uploads/
 ESP32/include/secrets.h
 ESP32/.pio/
 ESP32/.vscode/
+scripts/_ai_probe_out.txt
