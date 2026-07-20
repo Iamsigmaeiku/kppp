@@ -24,7 +24,10 @@
         });
       }
     }">
-      <template x-if="user && bound && bound.session_id && !bound.bound">
+      <template x-if="user && user.is_admin">
+        <span class="btn banner-chip" title="管理員可不綁本節車號">本節不綁定車號</span>
+      </template>
+      <template x-if="user && !user.is_admin && bound && bound.session_id && !bound.bound">
         <a class="btn banner-chip" href="/profile#bind-form">本節未綁定車號 →</a>
       </template>
       <template x-if="user">

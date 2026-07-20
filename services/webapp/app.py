@@ -30,6 +30,7 @@ from . import (
     grafana_proxy,
     history,
     pages,
+    position_ws,
     session_control,
     session_numbering,
     telemetry,
@@ -135,6 +136,7 @@ def configure_app() -> None:
     app.include_router(ai_coach.router)
     app.include_router(session_control.router)
     app.include_router(telemetry.router)
+    app.include_router(position_ws.router)
     app.include_router(grafana_proxy.router)
     app.include_router(pages.router)
 
@@ -161,5 +163,29 @@ def configure_app() -> None:
     @app.on_event("startup")
     async def _startup_influx_ping() -> None:
         await _lifespan_ping()
+        await _sync_admin_flags_from_env()
+
+    async def _sync_admin_flags_from_env() -> None:
+        emails = getattr(app.state.web_config, "admin_emails", frozenset())
+        if not emails:
+            return
+        from sqlalchemy import select
+
+        from .auth import sync_user_admin_flag
+        from .models import User
+
+        try:
+            async with session_factory() as db:
+                result = await db.execute(select(User))
+                changed = False
+                for user in result.scalars():
+                    before = user.is_admin
+                    sync_user_admin_flag(user, emails)
+                    if user.is_admin != before:
+                        changed = True
+                if changed:
+                    await db.commit()
+        except Exception:
+            logger.exception("admin email sync failed")
 
     app.state.webapp_configured = True

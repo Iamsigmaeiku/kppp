@@ -72,7 +72,10 @@ def build_oauth(google: GoogleOAuthConfig) -> OAuth:
         name="google",
         client_id=google.client_id,
         client_secret=google.client_secret,
-        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+        access_token_url="https://oauth2.googleapis.com/token",
+        userinfo_endpoint="https://openidconnect.googleapis.com/v1/userinfo",
+        jwks_uri="https://www.googleapis.com/oauth2/v3/certs",
         client_kwargs={"scope": "openid email profile"},
     )
     return oauth
@@ -86,10 +89,20 @@ def user_public_dict(user: User) -> dict:
         "nickname": user.nickname,
         "google_display_name": user.display_name,
         "avatar_url": avatar_url_for(user),
+        "is_admin": bool(user.is_admin),
     }
 
 
-async def _upsert_user_from_userinfo(session: AsyncSession, userinfo: dict) -> User:
+def sync_user_admin_flag(user: User, admin_emails: frozenset[str]) -> None:
+    user.is_admin = user.email.strip().lower() in admin_emails
+
+
+async def _upsert_user_from_userinfo(
+    session: AsyncSession,
+    userinfo: dict,
+    *,
+    admin_emails: frozenset[str],
+) -> User:
     result = await session.execute(
         select(User).where(User.google_sub == userinfo["sub"])
     )
@@ -111,6 +124,8 @@ async def _upsert_user_from_userinfo(session: AsyncSession, userinfo: dict) -> U
         user.display_name = userinfo.get("name")
         user.google_picture_url = userinfo.get("picture")
         user.last_login_at = now
+
+    sync_user_admin_flag(user, admin_emails)
 
     await session.commit()
     await session.refresh(user)
@@ -163,7 +178,11 @@ async def google_callback(request: Request):
     try:
         session_factory = request.app.state.session_factory
         async with session_factory() as session:
-            user = await _upsert_user_from_userinfo(session, userinfo)
+            user = await _upsert_user_from_userinfo(
+                session,
+                userinfo,
+                admin_emails=request.app.state.web_config.admin_emails,
+            )
     except Exception:
         logger.exception("google oauth upsert user failed")
         return RedirectResponse(url="/login?error=oauth", status_code=302)
@@ -191,6 +210,7 @@ async def dev_login(request: Request):
                 "name": "Dev User",
                 "picture": None,
             },
+            admin_emails=request.app.state.web_config.admin_emails,
         )
 
     request.session["user_id"] = user.id

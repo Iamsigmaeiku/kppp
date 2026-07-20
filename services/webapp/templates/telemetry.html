@@ -34,11 +34,72 @@
     border-top: 1px solid var(--border);
   }
   .telemetry-device-row:first-of-type { border-top: 0; padding-top: 0; }
+  .telemetry-timebar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.65rem;
+    align-items: center;
+    margin: 0.35rem 0 0.85rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-alt);
+  }
+  .telemetry-timebar .label {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    margin-right: 0.15rem;
+  }
+  .telemetry-timebar .chip {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 0.28rem 0.7rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .telemetry-timebar .chip:hover { border-color: var(--accent, #5b8def); }
+  .telemetry-timebar .chip.active {
+    background: color-mix(in srgb, var(--accent, #5b8def) 22%, var(--panel));
+    border-color: var(--accent, #5b8def);
+    color: var(--text);
+  }
+  .telemetry-timebar .sep {
+    width: 1px;
+    height: 1.4rem;
+    background: var(--border);
+    margin: 0 0.15rem;
+  }
+  .telemetry-timebar input[type="datetime-local"] {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.28rem 0.45rem;
+    font-size: 0.8rem;
+  }
+  .telemetry-timebar .apply-btn {
+    appearance: none;
+    border: 1px solid var(--accent, #5b8def);
+    background: color-mix(in srgb, var(--accent, #5b8def) 18%, var(--panel));
+    color: var(--text);
+    border-radius: 6px;
+    padding: 0.28rem 0.75rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .telemetry-timebar .mode-hint {
+    color: var(--text-faint);
+    font-size: 0.75rem;
+    margin-left: auto;
+  }
   .telemetry-frame-wrap {
     position: relative;
     width: 100%;
-    height: calc(100vh - 260px);
-    min-height: 640px;
+    height: calc(100vh - 240px);
+    min-height: 960px;
     border-radius: var(--radius);
     overflow: hidden;
     border: 1px solid var(--border);
@@ -49,7 +110,7 @@
     display: block;
     width: 100%;
     height: 100%;
-    min-height: 640px;
+    min-height: 960px;
     border: 0;
     background: #0b0f18;
   }
@@ -58,8 +119,8 @@
 
 {% block content %}
 <div class="panel" style="padding:1rem 1.1rem 1.15rem;"
-     x-data="telemetryStatus()"
-     x-init="poll()">
+     x-data="telemetryPage()"
+     x-init="init()">
   <div class="panel-header" style="margin-bottom:0.75rem;">卡丁車遙測（IMU / GPS / 雙 IMU）</div>
   <div class="telemetry-status" id="telemetryStatus">
     <span>
@@ -81,6 +142,10 @@
           GY85 hd=<span x-text="fmt(dev.sample?.gy85_heading_deg, 0)"></span>°
           · MPU T=<span x-text="fmt(dev.sample?.mpu_temp_c)"></span>°C
         </span>
+        <span x-show="dev.sample?.roll_deg != null || dev.sample?.pitch_deg != null" x-cloak>
+          EKF roll=<span x-text="fmt(dev.sample?.roll_deg)"></span>°
+          · pitch=<span x-text="fmt(dev.sample?.pitch_deg)"></span>°
+        </span>
         <span>
           <span class="dot" :class="hasGpsFix(dev) ? 'ok' : 'warn'"></span>
           <template x-if="hasGpsFix(dev)">
@@ -99,11 +164,30 @@
     </template>
   </div>
 
+  <div class="telemetry-timebar" x-show="baseUrl" x-cloak>
+    <span class="label">時間範圍</span>
+    <template x-for="q in quickRanges" :key="q.id">
+      <button type="button"
+              class="chip"
+              :class="mode === 'live' && liveId === q.id ? 'active' : ''"
+              @click="setLive(q.id)"
+              x-text="q.label"></button>
+    </template>
+    <div class="sep" aria-hidden="true"></div>
+    <span class="label">回放</span>
+    <input type="datetime-local" step="60" x-model="customFrom">
+    <span style="color:var(--text-faint);font-size:0.8rem;">→</span>
+    <input type="datetime-local" step="60" x-model="customTo">
+    <button type="button" class="apply-btn" @click="applyCustom()">套用</button>
+    <span class="mode-hint"
+          x-text="mode === 'live' ? ('即時 · 自動刷新 ' + (liveId || '15m')) : '回放 · 已關閉自動刷新'"></span>
+  </div>
+
   <div class="telemetry-frame-wrap">
     {% if grafana_embed_url %}
     <iframe
       title="Kart Telemetry Grafana"
-      src="{{ grafana_embed_url }}"
+      :src="iframeSrc"
       referrerpolicy="no-referrer-when-downgrade"
       allowfullscreen
     ></iframe>
@@ -117,11 +201,28 @@
   </p>
 </div>
 <script>
-function telemetryStatus() {
+function telemetryPage() {
+  const baseUrl = {{ grafana_embed_url|tojson }};
+  const displayTz = {{ display_timezone|tojson }};
+
   return {
+    baseUrl,
+    displayTz,
     last: null,
     devices: {},
     online: false,
+    mode: 'live',
+    liveId: '15m',
+    customFrom: '',
+    customTo: '',
+    iframeSrc: '',
+    quickRanges: [
+      { id: '5m', label: '5m', from: 'now-5m', to: 'now' },
+      { id: '15m', label: '15m', from: 'now-15m', to: 'now' },
+      { id: '1h', label: '1h', from: 'now-1h', to: 'now' },
+      { id: '6h', label: '6h', from: 'now-6h', to: 'now' },
+      { id: 'today', label: '今天', from: null, to: 'now' },
+    ],
     get deviceList() {
       const entries = Object.values(this.devices || {});
       if (entries.length) {
@@ -144,6 +245,104 @@ function telemetryStatus() {
       if (v === null || v === undefined || Number.isNaN(v)) return '—';
       return Number(v).toFixed(decimals);
     },
+    buildUrl(from, to, refresh) {
+      if (!this.baseUrl) return '';
+      const u = new URL(this.baseUrl, window.location.origin);
+      u.searchParams.set('from', String(from));
+      u.searchParams.set('to', String(to));
+      if (refresh) u.searchParams.set('refresh', refresh);
+      else u.searchParams.set('refresh', 'off');
+      return u.href;
+    },
+    startOfTodayMs() {
+      try {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone: this.displayTz || 'Asia/Taipei',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+        }).formatToParts(new Date());
+        const get = (t) => parts.find((p) => p.type === t)?.value;
+        const y = get('year'), m = get('month'), d = get('day');
+        // Interpret local midnight in display TZ as absolute instant via offset probe
+        const noonUtcGuess = Date.parse(`${y}-${m}-${d}T12:00:00Z`);
+        const fmt = new Intl.DateTimeFormat('en-US', {
+          timeZone: this.displayTz || 'Asia/Taipei',
+          hour: 'numeric', hour12: false,
+        });
+        const hourInTz = Number(fmt.format(new Date(noonUtcGuess)));
+        const offsetHours = hourInTz - 12;
+        return Date.parse(`${y}-${m}-${d}T00:00:00Z`) - offsetHours * 3600 * 1000;
+      } catch (_) {
+        const n = new Date();
+        n.setHours(0, 0, 0, 0);
+        return n.getTime();
+      }
+    },
+    localInputValue(ms) {
+      try {
+        const d = new Date(ms);
+        const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone: this.displayTz || 'Asia/Taipei',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        }).formatToParts(d);
+        const get = (t) => parts.find((p) => p.type === t)?.value;
+        return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+      } catch (_) {
+        const d = new Date(ms);
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      }
+    },
+    parseLocalInput(value) {
+      if (!value) return NaN;
+      // datetime-local is wall time in display TZ → absolute ms
+      const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+      if (!m) return Date.parse(value);
+      const [, y, mo, d, h, mi] = m;
+      const utcGuess = Date.UTC(+y, +mo - 1, +d, +h, +mi, 0);
+      try {
+        const fmt = new Intl.DateTimeFormat('en-US', {
+          timeZone: this.displayTz || 'Asia/Taipei',
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        const parts = fmt.formatToParts(new Date(utcGuess));
+        const get = (t) => Number(parts.find((p) => p.type === t)?.value);
+        const asIf = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'));
+        return utcGuess - (asIf - utcGuess);
+      } catch (_) {
+        return Date.parse(value);
+      }
+    },
+    setLive(id) {
+      const q = this.quickRanges.find((x) => x.id === id) || this.quickRanges[1];
+      this.mode = 'live';
+      this.liveId = q.id;
+      let from = q.from;
+      let to = q.to;
+      if (q.id === 'today') {
+        from = String(this.startOfTodayMs());
+        to = 'now';
+      }
+      this.iframeSrc = this.buildUrl(from, to, '2s');
+    },
+    applyCustom() {
+      const fromMs = this.parseLocalInput(this.customFrom);
+      const toMs = this.parseLocalInput(this.customTo);
+      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
+        alert('請設定有效的起迄時間（迄須晚於起）');
+        return;
+      }
+      this.mode = 'replay';
+      this.liveId = '';
+      this.iframeSrc = this.buildUrl(String(fromMs), String(toMs), 'off');
+    },
+    initDefaults() {
+      const now = Date.now();
+      this.customTo = this.localInputValue(now);
+      this.customFrom = this.localInputValue(now - 60 * 60 * 1000);
+      this.setLive('15m');
+    },
     async poll() {
       const tick = async () => {
         try {
@@ -157,7 +356,11 @@ function telemetryStatus() {
       };
       await tick();
       setInterval(tick, 3000);
-    }
+    },
+    init() {
+      this.initDefaults();
+      this.poll();
+    },
   };
 }
 </script>

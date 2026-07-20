@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/telemetry")
 
 MEASUREMENT = "kart_telemetry"
+MEASUREMENT_ATTITUDE = "attitude"
 MEASUREMENT_DR = "dr_position"
 MEASUREMENT_GPS_TRACK = "gps_track"
 
@@ -251,6 +252,48 @@ def _gps_track_points(
     return points
 
 
+async def _latest_attitude_by_device(
+    request: Request, device_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    if not device_ids:
+        return {}
+
+    quoted_ids = ", ".join(f'"{device_id}"' for device_id in sorted(set(device_ids)))
+    flux = f'''
+from(bucket: "{request.app.state.influx_reader._config.bucket}")
+  |> range(start: -10m)
+  |> filter(fn: (r) => r._measurement == "{MEASUREMENT_ATTITUDE}")
+  |> filter(fn: (r) => contains(value: r.device_id, set: [{quoted_ids}]))
+  |> filter(fn: (r) => r._field == "roll_deg" or r._field == "pitch_deg")
+  |> group(columns: ["device_id", "_field"])
+  |> last()
+  |> pivot(rowKey: ["device_id", "_time"], columnKey: ["_field"], valueColumn: "_value")
+'''
+
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        tables = await request.app.state.influx_reader._query(flux)
+    except Exception:
+        logger.exception("telemetry attitude query failed")
+        return out
+
+    for table in tables:
+        for record in table.records:
+            device_id = record.values.get("device_id")
+            if not device_id:
+                continue
+            out[str(device_id)] = {
+                "roll_deg": record.values.get("roll_deg"),
+                "pitch_deg": record.values.get("pitch_deg"),
+                "attitude_at": (
+                    record.get_time().astimezone(timezone.utc).isoformat()
+                    if record.get_time() is not None
+                    else None
+                ),
+            }
+    return out
+
+
 @router.post("/ingest")
 async def ingest_telemetry(
     request: Request,
@@ -314,6 +357,19 @@ async def ingest_telemetry(
     request.app.state.telemetry_last = entry
     by_device[body.device_id] = entry
 
+    try:
+        from .position_ws import notify_position_from_ingest
+
+        await notify_position_from_ingest(
+            request,
+            device_id=body.device_id,
+            car_id=body.car_id,
+            received_at=entry["received_at"],
+            sample=sample_dict,
+        )
+    except Exception:
+        logger.exception("position broadcast failed device_id=%s", body.device_id)
+
     return {"status": "ok", "written": len(points)}
 
 
@@ -329,4 +385,28 @@ async def telemetry_status(request: Request) -> dict:
     last = getattr(request.app.state, "telemetry_last", None)
     by_device = getattr(request.app.state, "telemetry_by_device", None)
     devices = by_device if isinstance(by_device, dict) else {}
-    return {"last": last, "devices": devices}
+
+    device_ids = [str(k) for k in devices.keys()]
+    if not device_ids and isinstance(last, dict) and last.get("device_id"):
+        device_ids = [str(last["device_id"])]
+
+    attitude_by_device = await _latest_attitude_by_device(request, device_ids)
+
+    out_devices: dict[str, Any] = {}
+    for device_id, entry in devices.items():
+        if not isinstance(entry, dict):
+            out_devices[str(device_id)] = entry
+            continue
+        merged = dict(entry)
+        sample = dict(entry.get("sample") or {})
+        sample.update(attitude_by_device.get(str(device_id), {}))
+        merged["sample"] = sample
+        out_devices[str(device_id)] = merged
+
+    out_last = last
+    if isinstance(last, dict) and last.get("device_id"):
+        out_last = dict(last)
+        sample = dict(last.get("sample") or {})
+        sample.update(attitude_by_device.get(str(last["device_id"]), {}))
+        out_last["sample"] = sample
+    return {"last": out_last, "devices": out_devices}

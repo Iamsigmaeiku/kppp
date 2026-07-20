@@ -47,10 +47,35 @@ class WebAppConfig:
     display_timezone: str
     telemetry_ingest_token: str
     grafana_embed_url: str
+    telemetry_device_car_map: dict[str, str]
+    admin_emails: frozenset[str]
 
 
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
+
+
+def _parse_admin_emails(raw: str) -> frozenset[str]:
+    out: set[str] = set()
+    for part in (raw or "").split(","):
+        email = part.strip().lower()
+        if email and "@" in email:
+            out.add(email)
+    return frozenset(out)
+
+
+def _parse_device_car_map(raw: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        device_id, car_id = part.split(":", 1)
+        device_id, car_id = device_id.strip(), car_id.strip()
+        if device_id and car_id:
+            out[device_id] = car_id
+    return out
+
 
 
 def load_web_config() -> WebAppConfig:
@@ -109,4 +134,8 @@ def load_web_config() -> WebAppConfig:
         display_timezone=_env("DISPLAY_TIMEZONE", "Asia/Taipei"),
         telemetry_ingest_token=_env("TELEMETRY_INGEST_TOKEN"),
         grafana_embed_url=grafana_base,
+        telemetry_device_car_map=_parse_device_car_map(
+            _env("TELEMETRY_DEVICE_CAR_MAP")
+        ),
+        admin_emails=_parse_admin_emails(_env("ADMIN_EMAILS")),
     )

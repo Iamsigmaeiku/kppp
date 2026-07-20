@@ -2,6 +2,7 @@
   <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">即時面板</a>
   <a href="/leaderboard" class="{{ 'active' if request.url.path == '/leaderboard' else '' }}">排行榜</a>
   <a href="/sessions" class="{{ 'active' if request.url.path.startswith('/sessions') else '' }}">場次紀錄</a>
+  <a href="/live-map" class="{{ 'active' if request.url.path.startswith('/live-map') else '' }}">賽道地圖</a>
   {% if show_telemetry|default(false) %}
   <a href="/telemetry" class="{{ 'active' if request.url.path.startswith('/telemetry') else '' }}">遙測數據</a>
   {% endif %}

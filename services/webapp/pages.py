@@ -89,8 +89,26 @@ async def telemetry_page(
         template_globals(
             user,
             grafana_embed_url=web_config.grafana_embed_url,
+            display_timezone=web_config.display_timezone,
             telemetry_last=last,
         ),
+    )
+
+
+@router.get("/live-map", response_class=HTMLResponse)
+@router.get("/live-map/", response_class=HTMLResponse)
+async def live_map_page(
+    request: Request, user: User | None = Depends(get_current_user)
+):
+    if user is None:
+        return RedirectResponse(url="/login?next=/live-map", status_code=302)
+
+    from .track_coords import track_js_constants
+
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "live_map.html",
+        template_globals(user, track=track_js_constants()),
     )
 
 

@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from services.webapp.auth import build_oauth
+from services.webapp.config import GoogleOAuthConfig
+
 
 def test_unauthenticated_html_redirects_to_login(webapp_client):
     r = webapp_client.get("/", follow_redirects=False)
@@ -60,6 +63,25 @@ def test_dev_login_sets_session_and_me_reflects_it(webapp_client):
     user = r2.json()["user"]
     assert user is not None
     assert user["email"] == "dev@example.local"
+
+
+def test_build_oauth_uses_static_google_endpoints():
+    oauth = build_oauth(
+        GoogleOAuthConfig(
+            client_id="cid",
+            client_secret="sec",
+            redirect_uri="https://example.com/callback",
+        )
+    )
+    client = oauth.create_client("google")
+    assert client is not None
+    assert client.client_kwargs["scope"] == "openid email profile"
+    assert client.authorize_url == "https://accounts.google.com/o/oauth2/v2/auth"
+    assert client.access_token_url == "https://oauth2.googleapis.com/token"
+    assert client.server_metadata["userinfo_endpoint"] == (
+        "https://openidconnect.googleapis.com/v1/userinfo"
+    )
+    assert client.server_metadata["jwks_uri"] == "https://www.googleapis.com/oauth2/v3/certs"
 
 
 def test_logout_clears_session(webapp_client):

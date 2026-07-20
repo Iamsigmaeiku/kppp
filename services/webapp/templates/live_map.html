@@ -1,0 +1,360 @@
+{% extends "base.html" %}
+
+{% block title %}賽道地圖 · TKS Dashboard{% endblock %}
+{% block heading %}賽道地圖{% endblock %}
+
+{% block head %}
+<style>
+  .live-map-wrap {
+    position: relative;
+    width: 100%;
+    max-width: min(96vw, 1100px);
+    margin: 0 auto;
+    border-radius: var(--radius);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: #0a0e14;
+    box-shadow: var(--shadow);
+    aspect-ratio: 1 / 1;
+  }
+  .live-map-wrap img.track {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    user-select: none;
+    pointer-events: none;
+  }
+  .live-map-stage {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .kart-marker {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    will-change: transform;
+    transition: transform 0.12s linear;
+  }
+  .kart-marker.stale { opacity: 0.45; filter: grayscale(0.85); }
+  .kart-inner {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+  }
+  .kart-heading {
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-bottom: 10px solid var(--ring, #5b8def);
+    margin-bottom: -2px;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55));
+    transform-origin: 50% 100%;
+  }
+  .kart-avatar {
+    width: 2.6rem;
+    height: 2.6rem;
+    border-radius: 50%;
+    border: 3px solid var(--ring, #5b8def);
+    object-fit: cover;
+    background: #1a2230;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.55);
+  }
+  .kart-fallback {
+    width: 2.6rem;
+    height: 2.6rem;
+    border-radius: 50%;
+    border: 3px solid var(--ring, #5b8def);
+    background: #1a2230;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.95rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.55);
+  }
+  .kart-label {
+    max-width: 7rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(8, 12, 18, 0.78);
+    color: #f2f5fa;
+    font-size: 0.68rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+    border: 1px solid rgba(255,255,255,0.12);
+  }
+  .live-map-hud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem 1rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+  }
+  .live-map-hud .dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 0.35rem;
+    background: var(--text-faint);
+  }
+  .live-map-hud .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(52, 211, 153, 0.45); }
+  .live-map-hud .dot.warn { background: var(--warn); }
+  .live-map-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.85rem;
+    margin-top: 0.85rem;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+  }
+  .live-map-legend .item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .live-map-legend .swatch {
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 50%;
+  }
+  .trail-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="panel" style="padding:1rem 1.1rem 1.2rem;"
+     x-data="liveMap()"
+     x-init="init()">
+  <div class="live-map-hud">
+    <span>
+      <span class="dot" :class="connected ? 'ok' : 'warn'"></span>
+      <span x-text="connected ? '即時定位連線中' : '連線中斷，重試中…'"></span>
+    </span>
+    <span x-text="Object.keys(karts).length + ' 台車在圖上'"></span>
+    <span style="color:var(--text-faint);">TKS 橋頭 · IMU/GPS</span>
+  </div>
+
+  <div class="live-map-wrap" x-ref="wrap">
+    <img class="track"
+         src="/webapp-static/tracks/tks_qiaotou_track.png"
+         alt="TKS 橋頭賽道衛星圖"
+         width="1280"
+         height="1280"
+         @load="onTrackLoad($event)" />
+    <svg class="trail-layer" viewBox="0 0 {{ track.imgW }} {{ track.imgH }}" preserveAspectRatio="xMidYMid meet">
+      <template x-for="k in kartList" :key="'trail-' + k.device_id">
+        <polyline
+          fill="none"
+          :stroke="k.color"
+          stroke-width="3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          :opacity="k.stale ? 0.2 : 0.55"
+          :points="trailPoints(k)"
+        ></polyline>
+      </template>
+    </svg>
+    <div class="live-map-stage" x-ref="stage">
+      <template x-for="k in kartList" :key="k.device_id">
+        <div class="kart-marker"
+             :class="k.stale ? 'stale' : ''"
+             :style="markerStyle(k)">
+          <div class="kart-inner">
+            <div class="kart-heading"
+                 :style="'transform: rotate(' + (k.heading_deg ?? 0) + 'deg); --ring:' + k.color"></div>
+            <template x-if="k.avatar_url">
+              <img class="kart-avatar" :src="k.avatar_url" :alt="k.label"
+                   :style="'--ring:' + k.color" />
+            </template>
+            <template x-if="!k.avatar_url">
+              <div class="kart-fallback" :style="'--ring:' + k.color"
+                   x-text="k.initial"></div>
+            </template>
+            <div class="kart-label" x-text="k.label"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <div class="live-map-legend">
+    <template x-for="k in kartList" :key="'lg-' + k.device_id">
+      <span class="item">
+        <span class="swatch" :style="'background:' + k.color"></span>
+        <span x-text="k.label"></span>
+        <span style="color:var(--text-faint);"
+              x-text="(k.speed_mps != null ? (k.speed_mps * 3.6).toFixed(0) + ' km/h' : '') + (k.source ? ' · ' + k.source : '')"></span>
+      </span>
+    </template>
+  </div>
+</div>
+
+<script>
+function liveMap() {
+  const track = {{ track|tojson }};
+  const COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4', '#f97316', '#e11d48'];
+
+  return {
+    track,
+    connected: false,
+    karts: {},
+    ws: null,
+    _layout: { left: 0, top: 0, scale: 1 },
+    _staleTimer: null,
+    get kartList() {
+      return Object.values(this.karts).sort((a, b) =>
+        String(a.device_id).localeCompare(String(b.device_id)));
+    },
+    colorFor(deviceId) {
+      let h = 0;
+      const s = String(deviceId || '');
+      for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+      return COLORS[h % COLORS.length];
+    },
+    latlngToPx(lat, lng) {
+      const y_m = (lat - track.centerLat) * 111320.0;
+      const x_m = (lng - track.centerLng) * (111320.0 * Math.cos(track.centerLat * Math.PI / 180));
+      const px = (track.imgW / 2) + x_m / track.mpp;
+      const py = (track.imgH / 2) - y_m / track.mpp;
+      return { px, py };
+    },
+    onTrackLoad(ev) {
+      this.measureLayout(ev.target);
+    },
+    measureLayout(img) {
+      if (!img) return;
+      const wrap = this.$refs.wrap;
+      if (!wrap) return;
+      const wr = wrap.getBoundingClientRect();
+      const natW = track.imgW, natH = track.imgH;
+      const scale = Math.min(wr.width / natW, wr.height / natH);
+      const drawW = natW * scale, drawH = natH * scale;
+      this._layout = {
+        left: (wr.width - drawW) / 2,
+        top: (wr.height - drawH) / 2,
+        scale,
+      };
+    },
+    markerStyle(k) {
+      const L = this._layout;
+      const x = L.left + k.px * L.scale;
+      const y = L.top + k.py * L.scale;
+      return `transform: translate(${x}px, ${y}px);`;
+    },
+    trailPoints(k) {
+      if (!k.trail || !k.trail.length) return '';
+      return k.trail.map((p) => `${p.px},${p.py}`).join(' ');
+    },
+    upsert(msg) {
+      if (msg.lat == null || msg.lon == null) return;
+      const { px, py } = this.latlngToPx(msg.lat, msg.lon);
+      const id = msg.device_id;
+      const prev = this.karts[id] || {
+        device_id: id,
+        color: this.colorFor(id),
+        trail: [],
+      };
+      const label = msg.display_name
+        || (msg.car_id ? ('#' + msg.car_id) : null)
+        || id;
+      const initial = String(label).trim().charAt(0).toUpperCase() || '?';
+      const trail = (prev.trail || []).slice(-40);
+      trail.push({ px, py });
+      this.karts = {
+        ...this.karts,
+        [id]: {
+          ...prev,
+          device_id: id,
+          car_id: msg.car_id,
+          display_name: msg.display_name,
+          avatar_url: msg.avatar_url || null,
+          label,
+          initial,
+          lat: msg.lat,
+          lon: msg.lon,
+          px, py,
+          heading_deg: msg.heading_deg,
+          speed_mps: msg.speed_mps,
+          source: msg.source,
+          received_at: msg.received_at,
+          stale: false,
+          trail,
+          color: prev.color || this.colorFor(id),
+        },
+      };
+    },
+    refreshStale() {
+      const now = Date.now();
+      let changed = false;
+      const next = { ...this.karts };
+      for (const [id, k] of Object.entries(next)) {
+        const age = k.received_at ? (now - Date.parse(k.received_at)) : Infinity;
+        const stale = !(Number.isFinite(age) && age < 15000);
+        if (k.stale !== stale) {
+          next[id] = { ...k, stale };
+          changed = true;
+        }
+      }
+      if (changed) this.karts = next;
+    },
+    connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws/positions`);
+      this.ws = ws;
+      ws.onopen = () => { this.connected = true; };
+      ws.onclose = () => {
+        this.connected = false;
+        setTimeout(() => this.connect(), 2000);
+      };
+      ws.onerror = () => { try { ws.close(); } catch (_) {} };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'snapshot' && Array.isArray(msg.positions)) {
+            for (const p of msg.positions) this.upsert(p);
+          } else if (msg.type === 'position') {
+            this.upsert(msg);
+          }
+          this.refreshStale();
+        } catch (_) { /* ignore */ }
+      };
+      setInterval(() => {
+        if (this.ws && this.ws.readyState === 1) {
+          try { this.ws.send('ping'); } catch (_) {}
+        }
+      }, 25000);
+    },
+    init() {
+      const img = this.$refs.wrap?.querySelector('img.track');
+      if (img?.complete) this.measureLayout(img);
+      window.addEventListener('resize', () => {
+        const i = this.$refs.wrap?.querySelector('img.track');
+        if (i) this.measureLayout(i);
+      });
+      this._staleTimer = setInterval(() => this.refreshStale(), 2000);
+      this.connect();
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -23,7 +23,7 @@ KART_02 = "esp32-kart-02"
 # 楠梓賽道附近預設視角
 MAP_LAT = 22.74230485
 MAP_LON = 120.32173316
-MAP_ZOOM = 19
+MAP_ZOOM = 18
 
 BASEMAP = {
     "name": "Google Satellite",
@@ -38,6 +38,21 @@ THR_G = [
     {"color": "green", "value": None},
     {"color": "yellow", "value": 1.5},
     {"color": "red", "value": 2.5},
+]
+THR_DECEL = [
+    {"color": "green", "value": None},
+    {"color": "yellow", "value": 0.4},
+    {"color": "red", "value": 0.9},
+]
+THR_GRIP = [
+    {"color": "green", "value": None},
+    {"color": "yellow", "value": 1.0},
+    {"color": "red", "value": 1.4},
+]
+THR_GRIP_PCT = [
+    {"color": "green", "value": None},
+    {"color": "yellow", "value": 60},
+    {"color": "red", "value": 90},
 ]
 THR_SPD = [
     {"color": "green", "value": None},
@@ -166,6 +181,190 @@ def flux_dr_path() -> str:
     )
 
 
+# a_lon < 0 → 減速量（g）；grip = √(a_lat²+a_lon²)；% 相對 1.6g 圓
+_GRIP_LIMIT_G = 1.6
+
+
+def flux_motion_derived(*, keep: list[str], every: str = "v.windowPeriod") -> str:
+    keep_cols = ", ".join(f'"{c}"' for c in ["_time", *keep])
+    return (
+        'import "math"\n'
+        f'from(bucket: "{BUCKET}")\n'
+        f"  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n"
+        f'  |> filter(fn: (r) => r._measurement == "kart_telemetry"'
+        f' and r.device_id == "{DEVICE_VAR}")\n'
+        f'  |> filter(fn: (r) => r._field == "a_lat" or r._field == "a_lon")\n'
+        f"  |> aggregateWindow(every: {every}, fn: last, createEmpty: false)\n"
+        f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
+        f"  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n"
+        f"  |> map(fn: (r) => ({{ r with\n"
+        f"      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n"
+        f"      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n"
+        f"      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon)"
+        f" / {_GRIP_LIMIT_G} * 100.0,\n"
+        f"  }}))\n"
+        f"  |> keep(columns: [{keep_cols}])"
+    )
+
+
+def flux_decel_markers() -> str:
+    """GPS 位置上的減速標註（decel_g 超過門檻才留）。"""
+    return (
+        'import "math"\n'
+        f'from(bucket: "{BUCKET}")\n'
+        f"  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n"
+        f'  |> filter(fn: (r) => r._measurement == "kart_telemetry"'
+        f' and r.device_id == "{DEVICE_VAR}" and r.gps_fix == "1")\n'
+        f'  |> filter(fn: (r) => r._field == "a_lon" or r._field == "gps_lat"'
+        f' or r._field == "gps_lon")\n'
+        f"  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n"
+        f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
+        f"  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon and exists r.a_lon)\n"
+        f"  |> map(fn: (r) => ({{ r with\n"
+        f"      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n"
+        f"  }}))\n"
+        f"  |> filter(fn: (r) => r.decel_g >= 0.25)\n"
+        f'  |> keep(columns: ["_time", "gps_lat", "gps_lon", "decel_g"])\n'
+        f'  |> sort(columns: ["_time"])'
+    )
+
+
+def panel_stat_query(
+    pid: int,
+    title: str,
+    query: str,
+    x: int,
+    y: int,
+    *,
+    w: int = 6,
+    h: int = 5,
+    unit: str = "none",
+    thresholds: list[dict] | None = None,
+    calc: str = "lastNotNull",
+) -> dict:
+    steps = thresholds or [{"color": "green", "value": None}]
+    return {
+        "datasource": DS,
+        "fieldConfig": {
+            "defaults": {
+                "color": {"mode": "thresholds"},
+                "thresholds": {"mode": "absolute", "steps": steps},
+                "unit": unit,
+                "decimals": 2,
+            },
+            "overrides": [],
+        },
+        "gridPos": {"h": h, "w": w, "x": x, "y": y},
+        "id": pid,
+        "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "reduceOptions": {"calcs": [calc], "fields": "", "values": False},
+        },
+        "targets": [{"datasource": DS, "query": query, "refId": "A"}],
+        "title": title,
+        "type": "stat",
+    }
+
+
+def panel_ts_query(
+    pid: int,
+    title: str,
+    query: str,
+    x: int,
+    y: int,
+    *,
+    w: int = 12,
+    h: int = 9,
+    unit: str = "none",
+    overrides: list[dict] | None = None,
+) -> dict:
+    return {
+        "datasource": DS,
+        "fieldConfig": {
+            "defaults": {
+                "color": {"mode": "palette-classic"},
+                "custom": {
+                    "drawStyle": "line",
+                    "fillOpacity": 12,
+                    "lineWidth": 2,
+                    "showPoints": "never",
+                    "spanNulls": True,
+                },
+                "unit": unit,
+            },
+            "overrides": overrides or [],
+        },
+        "gridPos": {"h": h, "w": w, "x": x, "y": y},
+        "id": pid,
+        "options": {
+            "legend": {"calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom"},
+            "tooltip": {"mode": "multi", "sort": "none"},
+        },
+        "targets": [{"datasource": DS, "query": query, "refId": "A"}],
+        "title": title,
+        "type": "timeseries",
+    }
+
+
+def panel_decel_geomap(pid: int, x: int, y: int) -> dict:
+    return {
+        "datasource": DS,
+        "fieldConfig": {
+            "defaults": {
+                "color": {"mode": "continuous-YlOrRd"},
+                "max": 1.5,
+                "min": 0.25,
+                "unit": "accG",
+            },
+            "overrides": [],
+        },
+        "gridPos": {"h": 16, "w": 12, "x": x, "y": y},
+        "id": pid,
+        "options": {
+            "view": {
+                "allLayers": False,
+                "id": "coords",
+                "lat": MAP_LAT,
+                "lon": MAP_LON,
+                "zoom": MAP_ZOOM,
+            },
+            "controls": {
+                "showZoom": False,
+                "mouseWheelZoom": False,
+                "showAttribution": True,
+                "showScale": True,
+                "showMeasure": False,
+            },
+            "basemap": BASEMAP,
+            "layers": [
+                {
+                    "type": "route",
+                    "name": "減速點",
+                    "config": {
+                        "style": {
+                            "size": {"fixed": 6},
+                            "color": {"field": "decel_g", "fixed": "dark-red"},
+                            "opacity": 0.95,
+                        }
+                    },
+                    "location": {
+                        "mode": "coords",
+                        "latitude": "gps_lat",
+                        "longitude": "gps_lon",
+                    },
+                    "filterData": {"id": "byRefId", "options": "A"},
+                },
+            ],
+        },
+        "targets": [
+            {"datasource": DS, "query": flux_decel_markers(), "refId": "A"},
+        ],
+        "title": "煞車點（GPS 上標示減速 >=0.25g）",
+        "type": "geomap",
+    }
+
+
 def panel_stat(
     pid: int,
     title: str,
@@ -244,6 +443,9 @@ def panel_ts(
 
 
 def panel_grip(pid: int, x: int, y: int) -> dict:
+    # Grafana 11 XY Chart：dims 只要 frame + x（其餘數值欄當 Y）；
+    # 舊的 dims.y / 缺 frame 會直接渲染成面板中央 "Err"。
+    # 參考圓固定當 frame 0，即使沒有 a_lat 資料也不會炸。
     circle_rows = ", ".join(
         f"{{a_lat: {1.6 * math.cos(i * math.pi / 16):.4f},"
         f" a_lon: {1.6 * math.sin(i * math.pi / 16):.4f}}}"
@@ -254,18 +456,75 @@ def panel_grip(pid: int, x: int, y: int) -> dict:
         "fieldConfig": {
             "defaults": {
                 "color": {"mode": "palette-classic"},
-                "custom": {"pointSize": 4},
-                "unit": "accG",
+                "custom": {
+                    "pointSize": {"fixed": 5, "min": 1, "max": 20},
+                    "show": "points",
+                },
+                "unit": "short",
             },
-            "overrides": [],
+            "overrides": [
+                {
+                    "matcher": {"id": "byFrameRefID", "options": "A"},
+                    "properties": [
+                        {"id": "color", "value": {"fixedColor": "#888888", "mode": "fixed"}},
+                        {
+                            "id": "custom.show",
+                            "value": "lines",
+                        },
+                        {
+                            "id": "custom.lineWidth",
+                            "value": 1,
+                        },
+                        {
+                            "id": "custom.pointSize",
+                            "value": {"fixed": 2, "min": 1, "max": 20},
+                        },
+                        {"id": "displayName", "value": "1.6g ring"},
+                    ],
+                },
+                {
+                    "matcher": {"id": "byFrameRefID", "options": "B"},
+                    "properties": [
+                        {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
+                        {"id": "custom.show", "value": "points"},
+                        {"id": "displayName", "value": "G"},
+                    ],
+                },
+            ],
         },
         "gridPos": {"h": 11, "w": 12, "x": x, "y": y},
         "id": pid,
         "options": {
-            "dims": {"x": "a_lat", "y": "a_lon"},
-            "seriesMapping": "auto",
+            "legend": {"displayMode": "list", "placement": "bottom", "showLegend": True},
+            "tooltip": {"mode": "single", "sort": "none"},
+            "dims": {"frame": 0, "x": "a_lat", "exclude": ["_time"]},
+            "seriesMapping": "manual",
+            "series": [
+                {
+                    "frame": 0,
+                    "x": "a_lat",
+                    "y": "a_lon",
+                    "name": "1.6g ring",
+                    "show": "lines",
+                    "pointSize": {"fixed": 2, "min": 1, "max": 20},
+                    "lineWidth": 1,
+                },
+                {
+                    "frame": 1,
+                    "x": "a_lat",
+                    "y": "a_lon",
+                    "name": "G",
+                    "show": "points",
+                    "pointSize": {"fixed": 5, "min": 1, "max": 20},
+                },
+            ],
         },
         "targets": [
+            {
+                "datasource": DS,
+                "query": f'import "array"\narray.from(rows: [{circle_rows}])',
+                "refId": "A",
+            },
             {
                 "datasource": DS,
                 "query": (
@@ -275,13 +534,10 @@ def panel_grip(pid: int, x: int, y: int) -> dict:
                     f' and r.device_id == "{DEVICE_VAR}")\n'
                     f'  |> filter(fn: (r) => r._field == "a_lat" or r._field == "a_lon")\n'
                     f"  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n"
-                    f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")'
+                    f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
+                    f'  |> keep(columns: ["_time", "a_lat", "a_lon"])\n'
+                    f"  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)"
                 ),
-                "refId": "A",
-            },
-            {
-                "datasource": DS,
-                "query": f'import "array"\narray.from(rows: [{circle_rows}])',
                 "refId": "B",
             },
         ],
@@ -302,7 +558,7 @@ def panel_geomap_device(pid: int, y: int) -> dict:
             },
             "overrides": [],
         },
-        "gridPos": {"h": 14, "w": 24, "x": 0, "y": y},
+        "gridPos": {"h": 22, "w": 24, "x": 0, "y": y},
         "id": pid,
         "options": {
             "view": {
@@ -313,8 +569,8 @@ def panel_geomap_device(pid: int, y: int) -> dict:
                 "zoom": MAP_ZOOM,
             },
             "controls": {
-                "showZoom": True,
-                "mouseWheelZoom": True,
+                "showZoom": False,
+                "mouseWheelZoom": False,
                 "showAttribution": True,
                 "showScale": True,
                 "showMeasure": False,
@@ -436,7 +692,7 @@ def panel_dual_geomap(pid: int, y: int) -> dict:
             },
             "overrides": [],
         },
-        "gridPos": {"h": 14, "w": 24, "x": 0, "y": y},
+        "gridPos": {"h": 22, "w": 24, "x": 0, "y": y},
         "id": pid,
         "options": {
             "view": {
@@ -447,8 +703,8 @@ def panel_dual_geomap(pid: int, y: int) -> dict:
                 "zoom": MAP_ZOOM,
             },
             "controls": {
-                "showZoom": True,
-                "mouseWheelZoom": True,
+                "showZoom": False,
+                "mouseWheelZoom": False,
                 "showAttribution": True,
                 "showScale": True,
                 "showMeasure": False,
@@ -576,11 +832,87 @@ def make_kart_telemetry() -> dict:
             unit="accG",
             agg="max",
         ),
-        panel_row(103, "Track", 68),
-        panel_geomap_device(30, 69),
-        panel_row(104, "Fleet", 83),
-        panel_dual_speed(40, 84),
-        panel_dual_geomap(41, 92),
+        panel_row(105, "煞車與抓地力", 68),
+        panel_stat_query(
+            50,
+            "煞車力",
+            flux_motion_derived(keep=["decel_g"]) + "\n  |> last()",
+            0,
+            69,
+            w=6,
+            h=5,
+            unit="accG",
+            thresholds=THR_DECEL,
+            calc="lastNotNull",
+        ),
+        panel_stat_query(
+            51,
+            "峰值煞車",
+            flux_motion_derived(keep=["decel_g"]) + "\n  |> max(column: \"decel_g\")",
+            6,
+            69,
+            w=6,
+            h=5,
+            unit="accG",
+            thresholds=THR_DECEL,
+            calc="max",
+        ),
+        panel_stat_query(
+            52,
+            "抓地力",
+            flux_motion_derived(keep=["grip_g"]) + "\n  |> last()",
+            12,
+            69,
+            w=6,
+            h=5,
+            unit="accG",
+            thresholds=THR_GRIP,
+            calc="lastNotNull",
+        ),
+        panel_stat_query(
+            53,
+            "抓地力 %（/1.6g）",
+            flux_motion_derived(keep=["grip_pct"]) + "\n  |> last()",
+            18,
+            69,
+            w=6,
+            h=5,
+            unit="percent",
+            thresholds=THR_GRIP_PCT,
+            calc="lastNotNull",
+        ),
+        panel_ts_query(
+            54,
+            "煞車力 / 抓地力",
+            flux_motion_derived(keep=["decel_g", "grip_g"]),
+            0,
+            74,
+            w=12,
+            h=16,
+            unit="accG",
+            overrides=[
+                {
+                    "matcher": {"id": "byName", "options": "decel_g"},
+                    "properties": [
+                        {"id": "displayName", "value": "煞車力"},
+                        {"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
+                    ],
+                },
+                {
+                    "matcher": {"id": "byName", "options": "grip_g"},
+                    "properties": [
+                        {"id": "displayName", "value": "抓地力"},
+                        {"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}},
+                    ],
+                },
+            ],
+        ),
+        panel_decel_geomap(55, 12, 74),
+        panel_row(103, "Track", 90),
+        panel_geomap_device(30, 91),
+        panel_row(104, "Fleet", 113),
+        panel_dual_speed(40, 114),
+        panel_dual_geomap(41, 122),
     ]
     return _shell(panels=panels)
 

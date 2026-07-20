@@ -39,6 +39,7 @@ class User(Base):
     avatar_path: Mapped[str | None] = mapped_column(default=None)
     # 保留給未來 TKS Line 會員 API 串接（見 line_stub.py），目前不使用。
     line_user_id: Mapped[str | None] = mapped_column(unique=True, default=None)
+    is_admin: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(default=None)
 

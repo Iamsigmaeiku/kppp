@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -25,6 +26,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _flux_for_imu(last_ts: datetime | None) -> str:
+    if last_ts is None:
+        range_clause = "|> range(start: -2s)"
+    else:
+        start = last_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        range_clause = f'|> range(start: time(v: "{start}"))'
+
+    return f'''
+from(bucket:"{BUCKET}")
+  {range_clause}
+  |> filter(fn: (r) => r._measurement == "{MEASUREMENT_IMU}")
+  |> filter(fn: (r) => r._field == "gx" or r._field == "gy" or r._field == "ax" or r._field == "ay" or r._field == "az")
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+'''
+
+
 def poll_loop(interval_sec: float = POLL_INTERVAL_SEC) -> None:
     if not INFLUX_TOKEN:
         raise SystemExit("INFLUX_TOKEN is empty — set it in .env")
@@ -34,15 +52,9 @@ def poll_loop(interval_sec: float = POLL_INTERVAL_SEC) -> None:
     write_api = client.write_api(write_options=SYNCHRONOUS)
 
     ekf = AttitudeEKF()
-    last_ts = None
-
-    flux = f'''
-from(bucket:"{BUCKET}")
-  |> range(start: -2s)
-  |> filter(fn: (r) => r._measurement == "{MEASUREMENT_IMU}")
-  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-  |> sort(columns: ["_time"])
-'''
+    last_ts: datetime | None = None
+    latest_gx: float | None = None
+    latest_gy: float | None = None
 
     logger.info(
         "polling %s/%s -> %s @ %s (interval=%.3fs)",
@@ -55,7 +67,12 @@ from(bucket:"{BUCKET}")
 
     try:
         while True:
-            tables = query_api.query(flux)
+            loop_started = time.perf_counter()
+
+            if latest_gx is not None and latest_gy is not None:
+                ekf.predict(latest_gx, latest_gy, interval_sec)
+
+            tables = query_api.query(_flux_for_imu(last_ts))
             for table in tables:
                 for record in table.records:
                     ts = record.get_time()
@@ -70,11 +87,8 @@ from(bucket:"{BUCKET}")
                     if None in (gx, gy, ax, ay, az):
                         continue
 
-                    dt = (ts - last_ts).total_seconds() if last_ts else interval_sec
-                    if dt <= 0 or dt > 1.0:
-                        dt = interval_sec
-
-                    ekf.predict(float(gx), float(gy), dt)
+                    latest_gx = float(gx)
+                    latest_gy = float(gy)
                     roll, pitch = ekf.update(float(ax), float(ay), float(az))
 
                     point = (
@@ -89,7 +103,10 @@ from(bucket:"{BUCKET}")
 
                     write_api.write(bucket=BUCKET, record=point)
                     last_ts = ts
-            time.sleep(interval_sec)
+
+            sleep_for = interval_sec - (time.perf_counter() - loop_started)
+            if sleep_for > 0:
+                time.sleep(sleep_for)
     except KeyboardInterrupt:
         logger.info("stopped")
     finally:

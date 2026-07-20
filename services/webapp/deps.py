@@ -35,3 +35,10 @@ async def require_user(request: Request) -> User:
     if user is None:
         raise HTTPException(status_code=401, detail="login required")
     return user
+
+
+async def require_admin(request: Request) -> User:
+    user = await require_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="admin required")
+    return user

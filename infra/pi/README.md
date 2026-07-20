@@ -13,8 +13,7 @@
 **重要：** keepalived VRRP 需要兩台同 L2。目前 kpp / chuck 在不同網段，
 VIP failover **在兩邊合到同一 LAN 之前無效**。合網後 VIP 才會真正飄移。
 
-`chuck` 上 keepalived 目前 **disabled**（避免不同網段 split-brain 搶
-`192.168.88.100`）。合到 `192.168.88.0/24` 後執行：
+infra/pi/README.md
 
 ```bash
 sudo systemctl enable --now keepalived
@@ -82,6 +81,11 @@ VRRP 尚未合網期間，網站只跑在 `kpp`：
   `kpp-port5000-proxy.socket` 轉到 `:8000`
 - Pi4 的 `kpp-dashboard.service` 與 `cloudflared.service` 保持停止
 - Pi5 暫時透過 Tailscale `100.102.122.104:8086` 讀取 Pi4 現有 InfluxDB
+
+**現場 W610 在 `192.168.0.0/24` 時（2026-07 起）：** 即時 ingest / 對外
+`chuck.dctggest.filegear-sg.me` 改跑 **Pi4（chuck）**——`kpp-dashboard` +
+`cloudflared` 在 chuck；**Pi5 的 `cloudflared` 必須停掉**，否則同一 tunnel
+token 會搶連線、外網 502。Pi5 只保留 Influx/Grafana 備援或 88 網段用途。
 
 ## keepalived 檔案
 

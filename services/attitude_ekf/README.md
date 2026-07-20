@@ -10,7 +10,7 @@
 python -m services.attitude_ekf.main
 ```
 
-可選：`EKF_POLL_INTERVAL_SEC=0.05`（預設）。
+可選：`EKF_POLL_INTERVAL_SEC=0.001`（預設，1 ms）。
 
 ## 驗收
 
