@@ -247,6 +247,8 @@ async def session_detail_page(
     except Exception:
         logger.exception("session_detail: failed to read session numbering from SQLite")
 
+    from .track_coords import track_js_constants
+
     return request.app.state.templates.TemplateResponse(
         request,
         "session_detail.html",
@@ -255,6 +257,7 @@ async def session_detail_page(
             session_id=session_id,
             summary=summary,
             race_session=race_session,
+            track=track_js_constants(),
         ),
     )
 
@@ -281,6 +284,42 @@ async def session_lap_history_api(
                     "recorded_at": lap.recorded_at.isoformat(),
                 }
                 for lap in laps
+            ]
+        }
+    )
+
+
+@router.get("/api/sessions/{session_id}/track-laps/{transponder_id}")
+async def session_lap_tracks_api(
+    request: Request, session_id: str, transponder_id: str
+):
+    reader = _get_reader(request)
+    laptime_filter = request.app.state.templates.env.filters["laptime"]
+    try:
+        lap_tracks = await reader.get_lap_tracks(session_id, transponder_id.upper())
+    except Exception as exc:
+        logger.exception("lap_tracks: failed to read from InfluxDB")
+        raise HTTPException(status_code=503, detail="InfluxDB 目前無法連線") from exc
+
+    return JSONResponse(
+        {
+            "laps": [
+                {
+                    "lap_number": lap.lap_number,
+                    "lap_time": lap.lap_time,
+                    "lap_time_label": laptime_filter(lap.lap_time),
+                    "recorded_at": lap.recorded_at.isoformat(),
+                    "source": lap.source,
+                    "points": [
+                        {
+                            "lat": point.lat,
+                            "lon": point.lon,
+                            "recorded_at": point.recorded_at.isoformat(),
+                        }
+                        for point in lap.points
+                    ],
+                }
+                for lap in lap_tracks
             ]
         }
     )

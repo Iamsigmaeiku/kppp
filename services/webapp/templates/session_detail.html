@@ -10,6 +10,53 @@
 {% endif %}
 {% endblock %}
 
+{% block head %}
+<style>
+  .lap-track-wrap {
+    position: relative;
+    width: min(100%, 720px);
+    aspect-ratio: 1 / 1;
+    margin-top: 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: #0a0e14;
+  }
+  .lap-track-wrap img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
+  }
+  .lap-track-wrap svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .lap-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .lap-chip-row button.active {
+    border-color: var(--accent, #5b8def);
+    background: color-mix(in srgb, var(--accent, #5b8def) 18%, var(--panel));
+  }
+  .lap-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 0.7rem;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="panel">
   <div class="table-wrap">
@@ -18,7 +65,7 @@
         <tr><th>排名</th><th>車號</th><th>圈數</th><th>最佳圈速</th><th>末圈</th><th></th></tr>
       </thead>
       {% for r in summary %}
-      <tbody x-data="{ open: false, laps: null, loading: false }">
+      <tbody x-data="sessionLapViewer('{{ session_id }}', '{{ r.transponder_id }}', {{ track|tojson }})">
         <tr class="rank-{{ loop.index }}">
           <td><span class="rank-badge">{{ loop.index }}</span></td>
           <td class="car">{{ r.car_number or r.transponder_id }}</td>
@@ -27,15 +74,7 @@
           <td class="last">{{ r.last_lap_time | laptime }}</td>
           <td>
             <button
-              @click="
-                open = !open;
-                if (open && !laps) {
-                  loading = true;
-                  fetch('/api/sessions/{{ session_id }}/laps/{{ r.transponder_id }}')
-                    .then(res => res.json())
-                    .then(data => { laps = data.laps; loading = false; });
-                }
-              "
+              @click="toggle()"
               x-text="open ? '收起' : '展開全部 {{ r.lap_count }} 圈'"
             ></button>
           </td>
@@ -43,13 +82,61 @@
         <tr x-show="open" x-cloak>
           <td colspan="6">
             <template x-if="loading"><span>載入中…</span></template>
-            <template x-if="laps && !loading">
+            <template x-if="error && !loading">
+              <span x-text="error"></span>
+            </template>
+            <template x-if="laps.length && !loading">
+              <div>
+                <div class="lap-chip-row">
+                  <template x-for="lap in laps" :key="lap.lap_number">
+                    <button
+                      type="button"
+                      class="btn"
+                      :class="selectedLap === lap.lap_number ? 'active' : ''"
+                      @click="selectedLap = lap.lap_number"
+                    >
+                      <b x-text="'#' + lap.lap_number"></b>&nbsp;<span x-text="lap.lap_time_label"></span>
+                    </button>
+                  </template>
+                </div>
+                <div class="lap-meta" x-show="selectedLapData()">
+                  <span>圈速：<b x-text="selectedLapData()?.lap_time_label || '—'"></b></span>
+                  <span>來源：<code x-text="selectedLapData()?.source || '—'"></code></span>
+                  <span>點數：<b x-text="selectedLapData()?.points?.length || 0"></b></span>
+                </div>
+                <template x-if="selectedLapPoints().length">
+                  <div class="lap-track-wrap">
+                    <img
+                      src="/webapp-static/tracks/tks_qiaotou_track.png"
+                      alt="TKS 橋頭賽道衛星圖"
+                      width="1280"
+                      height="1280"
+                    />
+                    <svg :viewBox="'0 0 ' + track.imgW + ' ' + track.imgH" preserveAspectRatio="xMidYMid meet">
+                      <polyline
+                        fill="none"
+                        stroke="#60a5fa"
+                        stroke-width="4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        :points="lapPolyline()"
+                      ></polyline>
+                    </svg>
+                  </div>
+                </template>
+                <template x-if="!selectedLapPoints().length">
+                  <div class="lap-meta">
+                    <span>這圈目前沒有可畫的走線資料。</span>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!laps.length && !loading && !error">
               <div style="display:flex;flex-wrap:wrap;gap:0.5rem;">
                 <template x-for="lap in laps" :key="lap.lap_number">
-                  <span class="btn" style="cursor:default;">
-                    <b x-text="'#' + lap.lap_number"></b>&nbsp;<span x-text="lap.lap_time_label"></span>
-                  </span>
+                  <span class="btn" style="cursor:default;"></span>
                 </template>
+                <span>還沒有圈速/走線資料。</span>
               </div>
             </template>
           </td>
@@ -59,4 +146,59 @@
     </table>
   </div>
 </div>
+
+<script>
+function sessionLapViewer(sessionId, transponderId, track) {
+  return {
+    open: false,
+    loading: false,
+    error: '',
+    laps: [],
+    selectedLap: null,
+    track,
+    toggle() {
+      this.open = !this.open;
+      if (this.open && !this.loading && !this.laps.length && !this.error) this.load();
+    },
+    async load() {
+      this.loading = true;
+      this.error = '';
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/track-laps/${transponderId}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        this.laps = Array.isArray(data.laps) ? data.laps : [];
+        const firstWithPoints = this.laps.find((lap) => Array.isArray(lap.points) && lap.points.length);
+        this.selectedLap = firstWithPoints?.lap_number ?? this.laps[0]?.lap_number ?? null;
+      } catch (err) {
+        this.error = `載入走線失敗：${err?.message || err}`;
+      } finally {
+        this.loading = false;
+      }
+    },
+    selectedLapData() {
+      return this.laps.find((lap) => lap.lap_number === this.selectedLap) || null;
+    },
+    selectedLapPoints() {
+      return this.selectedLapData()?.points || [];
+    },
+    latlngToPx(lat, lng) {
+      const y_m = (lat - this.track.centerLat) * 111320.0;
+      const x_m = (lng - this.track.centerLng) * (111320.0 * Math.cos(this.track.centerLat * Math.PI / 180));
+      return {
+        px: (this.track.imgW / 2) + x_m / this.track.mpp,
+        py: (this.track.imgH / 2) - y_m / this.track.mpp,
+      };
+    },
+    lapPolyline() {
+      return this.selectedLapPoints()
+        .map((p) => {
+          const xy = this.latlngToPx(p.lat, p.lon);
+          return `${xy.px},${xy.py}`;
+        })
+        .join(' ');
+    },
+  };
+}
+</script>
 {% endblock %}

@@ -98,6 +98,12 @@ static volatile uint32_t gpsSentenceCount = 0;
 static char gpsLastSentence[128];
 static portMUX_TYPE gpsSentMux = portMUX_INITIALIZER_UNLOCKED;
 
+static float clampf(float v, float lo, float hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
 static void gpsPoll() {
   static char lineBuf[128];
   static size_t lineLen = 0;
@@ -583,10 +589,29 @@ static bool icmReadSample(Sample &out) {
   const float lx = out.ax - gax;
   const float ly = out.ay - gay;
   const float lz = out.az - gaz;
-  out.accel_dyn = sqrtf(lx * lx + ly * ly + lz * lz);
+
+  // 引擎/路面震動會把去重力後瞬時值放大得很誇張；再做一層較快 LPF，
+  // 讓 Grafana 上看到的是較接近車體動態的 G 值，而不是高頻雜訊尖峰。
+  static float flx = 0, fly = 0, flz = 0;
+  static bool dynWarm = false;
+  constexpr float kDynAlpha = 0.25f;  // ~120ms @50Hz
+  constexpr float kHorizClampG = 2.0f;
+  constexpr float kDynClampG = 3.0f;
+  if (!dynWarm) {
+    flx = lx;
+    fly = ly;
+    flz = lz;
+    dynWarm = true;
+  } else {
+    flx += kDynAlpha * (lx - flx);
+    fly += kDynAlpha * (ly - fly);
+    flz += kDynAlpha * (lz - flz);
+  }
+
+  out.accel_dyn = clampf(sqrtf(flx * flx + fly * fly + flz * flz), 0.0f, kDynClampG);
   // 此安裝重力在 +Y（直立≈1g），水平動態 = X/Z，不要拿 ay 當 lateral
-  out.a_lon = lx;
-  out.a_lat = lz;
+  out.a_lon = clampf(flx, -kHorizClampG, kHorizClampG);
+  out.a_lat = clampf(flz, -kHorizClampG, kHorizClampG);
 
   out.millis_at = millis();
   out.has_imu = true;

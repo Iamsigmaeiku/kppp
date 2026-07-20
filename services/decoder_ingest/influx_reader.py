@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from influxdb_client.client.influxdb_client_async import InfluxDBClientAsync
 
@@ -55,6 +55,22 @@ class LapRecord:
     lap_number: int
     lap_time: float
     recorded_at: datetime
+
+
+@dataclass(slots=True)
+class TrackPoint:
+    lat: float
+    lon: float
+    recorded_at: datetime
+
+
+@dataclass(slots=True)
+class LapTrack:
+    lap_number: int
+    lap_time: float
+    recorded_at: datetime
+    source: str
+    points: list[TrackPoint] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -313,3 +329,140 @@ class InfluxReader:
                     )
                 )
         return entries
+
+    async def get_lap_tracks(
+        self, session_id: str, transponder_id: str
+    ) -> list[LapTrack]:
+        laps = await self.get_lap_history(session_id, transponder_id)
+        if not laps:
+            return []
+
+        car_number = await self._resolve_car_number(session_id, transponder_id)
+        if not car_number:
+            return []
+
+        session_start = started_at_from_session_id(session_id)
+        if session_start is None:
+            session_start = laps[0].recorded_at - timedelta(seconds=laps[0].lap_time)
+        session_end = laps[-1].recorded_at + timedelta(seconds=1)
+
+        points, source = await self._query_track_points(
+            car_number=car_number,
+            start=session_start,
+            stop=session_end,
+        )
+        if not points:
+            return []
+
+        out: list[LapTrack] = []
+        lap_start = session_start
+        idx = 0
+        for lap in laps:
+            seg_points: list[TrackPoint] = []
+            while idx < len(points):
+                point = points[idx]
+                if point.recorded_at < lap_start:
+                    idx += 1
+                    continue
+                if point.recorded_at > lap.recorded_at:
+                    break
+                seg_points.append(point)
+                idx += 1
+
+            out.append(
+                LapTrack(
+                    lap_number=lap.lap_number,
+                    lap_time=lap.lap_time,
+                    recorded_at=lap.recorded_at,
+                    source=source,
+                    points=seg_points,
+                )
+            )
+            lap_start = lap.recorded_at
+        return out
+
+    async def _resolve_car_number(self, session_id: str, transponder_id: str) -> str | None:
+        from .lap_tracker import normalize_transponder_id
+
+        want = normalize_transponder_id(transponder_id.upper().strip())
+        for row in await self.get_session_summary(session_id):
+            tid = normalize_transponder_id((row.transponder_id or "").upper().strip())
+            if tid == want:
+                car_number = (row.car_number or "").strip()
+                return car_number or None
+        return None
+
+    async def _query_track_points(
+        self,
+        *,
+        car_number: str,
+        start: datetime,
+        stop: datetime,
+    ) -> tuple[list[TrackPoint], str]:
+        gps_track = await self._fetch_track_points(
+            measurement="gps_track",
+            field_map={"lat": "lat", "lon": "lon"},
+            car_number=car_number,
+            start=start,
+            stop=stop,
+        )
+        if gps_track:
+            return gps_track, "gps_track"
+
+        dr_track = await self._fetch_track_points(
+            measurement="dr_position",
+            field_map={"lat_dr": "lat", "lon_dr": "lon"},
+            car_number=car_number,
+            start=start,
+            stop=stop,
+        )
+        if dr_track:
+            return dr_track, "dr_position"
+
+        raw_gps = await self._fetch_track_points(
+            measurement="kart_telemetry",
+            field_map={"gps_lat": "lat", "gps_lon": "lon"},
+            car_number=car_number,
+            start=start,
+            stop=stop,
+        )
+        return raw_gps, "kart_telemetry"
+
+    async def _fetch_track_points(
+        self,
+        *,
+        measurement: str,
+        field_map: dict[str, str],
+        car_number: str,
+        start: datetime,
+        stop: datetime,
+    ) -> list[TrackPoint]:
+        start_iso = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        stop_iso = stop.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        field_filters = " or ".join(f'r._field == "{field}"' for field in field_map)
+        keep_columns = ", ".join(f'"{field}"' for field in field_map)
+        query = (
+            f'from(bucket: "{self._config.bucket}") '
+            f'|> range(start: time(v: "{start_iso}"), stop: time(v: "{stop_iso}")) '
+            f'|> filter(fn: (r) => r._measurement == "{measurement}" and r.car_id == "{car_number}") '
+            f"|> filter(fn: (r) => {field_filters}) "
+            f'|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
+            f'|> keep(columns: ["_time", {keep_columns}]) '
+            f'|> sort(columns: ["_time"])'
+        )
+        tables = await self._query(query)
+
+        points: list[TrackPoint] = []
+        for table in tables:
+            for record in table.records:
+                values = record.values
+                lat_key, lon_key = list(field_map.keys())
+                lat = values.get(lat_key)
+                lon = values.get(lon_key)
+                ts = record.get_time()
+                if lat is None or lon is None or ts is None:
+                    continue
+                points.append(
+                    TrackPoint(lat=float(lat), lon=float(lon), recorded_at=ts)
+                )
+        return points

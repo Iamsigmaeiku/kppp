@@ -183,6 +183,18 @@ def flux_dr_path() -> str:
 
 # a_lon < 0 → 減速量（g）；grip = √(a_lat²+a_lon²)；% 相對 1.6g 圓
 _GRIP_LIMIT_G = 1.6
+_G_CLAMP_G = 2.0
+
+
+def _flux_g_norm() -> str:
+    return (
+        f"  |> map(fn: (r) => ({{ r with\n"
+        f"      a_lat: if r.a_lat > {_G_CLAMP_G} then {_G_CLAMP_G}"
+        f" else if r.a_lat < -{_G_CLAMP_G} then -{_G_CLAMP_G} else r.a_lat,\n"
+        f"      a_lon: if r.a_lon > {_G_CLAMP_G} then {_G_CLAMP_G}"
+        f" else if r.a_lon < -{_G_CLAMP_G} then -{_G_CLAMP_G} else r.a_lon,\n"
+        f"  }}))\n"
+    )
 
 
 def flux_motion_derived(*, keep: list[str], every: str = "v.windowPeriod") -> str:
@@ -197,6 +209,7 @@ def flux_motion_derived(*, keep: list[str], every: str = "v.windowPeriod") -> st
         f"  |> aggregateWindow(every: {every}, fn: last, createEmpty: false)\n"
         f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
         f"  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n"
+        f"{_flux_g_norm()}"
         f"  |> map(fn: (r) => ({{ r with\n"
         f"      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n"
         f"      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n"
@@ -220,6 +233,8 @@ def flux_decel_markers() -> str:
         f"  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n"
         f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
         f"  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon and exists r.a_lon)\n"
+        f"  |> map(fn: (r) => ({{ r with a_lon: if r.a_lon > {_G_CLAMP_G} then {_G_CLAMP_G}"
+        f" else if r.a_lon < -{_G_CLAMP_G} then -{_G_CLAMP_G} else r.a_lon }}))\n"
         f"  |> map(fn: (r) => ({{ r with\n"
         f"      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n"
         f"  }}))\n"
@@ -535,6 +550,7 @@ def panel_grip(pid: int, x: int, y: int) -> dict:
                     f'  |> filter(fn: (r) => r._field == "a_lat" or r._field == "a_lon")\n'
                     f"  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n"
                     f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
+                    f"{_flux_g_norm()}"
                     f'  |> keep(columns: ["_time", "a_lat", "a_lon"])\n'
                     f"  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)"
                 ),
