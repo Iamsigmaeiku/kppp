@@ -125,6 +125,6 @@ bool Icm42688Spi::readSample(IcmSample &out) {
   out.gy = gy / kGyroSens;
   out.gz = gz / kGyroSens;
   out.accel_mag = sqrtf(out.ax * out.ax + out.ay * out.ay + out.az * out.az);
-  out.ok = out.accel_mag >= ICM_MIN_ACCEL_MAG;
+  out.ok = out.accel_mag >= ICM_MIN_ACCEL_MAG && out.accel_mag <= ICM_MAX_ACCEL_MAG;
   return out.ok;
 }

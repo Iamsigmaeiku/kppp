@@ -68,6 +68,10 @@ static constexpr uint8_t ADXL_POWER_CTL = 0x2D;
 static constexpr uint8_t ADXL_DATA_FORMAT = 0x31;
 static constexpr uint8_t ADXL_DATAX0 = 0x32;
 static constexpr float ADXL_SENS = 256.0f;  // full-res LSB/g
+// 合理性檢查範圍：擋 I2C 斷線/全 0（下界）與雜訊/接觸不良造成的離譜尖峰
+// （上界，遠低於 ±16g 滿量程，但遠高於卡丁車真實動態峰值）。
+static constexpr float ADXL_MIN_ACCEL_MAG = 0.2f;
+static constexpr float ADXL_MAX_ACCEL_MAG = 8.0f;
 
 // ITG3205
 static constexpr uint8_t ITG_WHO = 0x00;
@@ -95,6 +99,9 @@ static constexpr uint8_t MPU_GYRO_CFG = 0x1B;
 static constexpr uint8_t MPU_ACCEL_OUT = 0x3B;
 static constexpr float MPU_ACCEL_SENS = 16384.0f;  // ±2g
 static constexpr float MPU_GYRO_SENS = 131.0f;     // ±250 dps
+// MPU 設成 ±2g，暫存器本身就會夾在這個範圍，這裡只擋斷線/全 0。
+static constexpr float MPU_MIN_ACCEL_MAG = 0.2f;
+static constexpr float MPU_MAX_ACCEL_MAG = 2.5f;
 
 static constexpr uint32_t IMU_PERIOD_MS = 40;  // 25 Hz
 static constexpr uint32_t POST_PERIOD_MS = 200;
@@ -274,6 +281,13 @@ static bool gy85Read(Sample &out) {
   out.gy85_ay = le16(&araw[2]) / ADXL_SENS;
   out.gy85_az = le16(&araw[4]) / ADXL_SENS;
 
+  const float accel_mag = sqrtf(out.gy85_ax * out.gy85_ax +
+                                 out.gy85_ay * out.gy85_ay +
+                                 out.gy85_az * out.gy85_az);
+  if (accel_mag < ADXL_MIN_ACCEL_MAG || accel_mag > ADXL_MAX_ACCEL_MAG) {
+    return false;
+  }
+
   out.gy85_gx = be16(&graw[0]) / ITG_SENS;
   out.gy85_gy = be16(&graw[2]) / ITG_SENS;
   out.gy85_gz = be16(&graw[4]) / ITG_SENS;
@@ -323,6 +337,14 @@ static bool mpuRead(Sample &out) {
   out.mpu_ax = ax / MPU_ACCEL_SENS;
   out.mpu_ay = ay / MPU_ACCEL_SENS;
   out.mpu_az = az / MPU_ACCEL_SENS;
+
+  const float accel_mag = sqrtf(out.mpu_ax * out.mpu_ax +
+                                 out.mpu_ay * out.mpu_ay +
+                                 out.mpu_az * out.mpu_az);
+  if (accel_mag < MPU_MIN_ACCEL_MAG || accel_mag > MPU_MAX_ACCEL_MAG) {
+    return false;
+  }
+
   out.mpu_gx = gx / MPU_GYRO_SENS;
   out.mpu_gy = gy / MPU_GYRO_SENS;
   out.mpu_gz = gz / MPU_GYRO_SENS;

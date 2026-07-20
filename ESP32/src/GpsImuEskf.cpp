@@ -24,6 +24,9 @@ constexpr float kQBgz = 0.001f;    // (dps)^2
 constexpr float kQBa = 1e-5f;      // g^2
 constexpr float kVelSigmaBase = 0.8f;
 constexpr float kZvuSpeedMps = 0.4f;
+// GPS course→yaw 量測噪音：低速時 course 本身雜訊很大，用 1/speed 放大 sigma。
+constexpr float kYawSigmaBaseRad = 0.15f;       // ~8.6°
+constexpr float kYawSigmaSpeedGain = 0.6f;      // rad·(m/s)
 
 float wrapPi(float a) {
   while (a > kPi) a -= 2.0f * kPi;
@@ -280,6 +283,37 @@ void GpsImuEskf::correctVelocity(float vx_gps, float vy_gps, float sigma_mps) {
   injectError();
 }
 
+void GpsImuEskf::correctYaw(float yaw_gps_rad, float sigma_rad) {
+  // 純量量測（H 只挑 yaw 這一維），流程跟 correctPosition/correctVelocity
+  // 一致：K = P Hᵀ S⁻¹、P = (I-KH)P，取代原本繞過協方差矩陣的 ad-hoc 混合。
+  const float r = sigma_rad * sigma_rad;
+  if (r < 1e-9f) return;
+
+  const float innov = wrapPi(yaw_gps_rad - yaw_rad_);
+  const float s = P_[kIyaw * kN + kIyaw] + r;
+  if (s < 1e-9f) return;
+  const float inv_s = 1.0f / s;
+
+  float K[kN];
+  for (int i = 0; i < kN; i++) {
+    K[i] = P_[i * kN + kIyaw] * inv_s;
+  }
+  for (int i = 0; i < kN; i++) {
+    dx_[i] += K[i] * innov;
+  }
+
+  std::memset(gKH, 0, sizeof(gKH));
+  for (int i = 0; i < kN; i++) {
+    gKH[i * kN + kIyaw] = K[i];
+  }
+  matEye(gIKH);
+  for (int i = 0; i < kN * kN; i++) gIKH[i] -= gKH[i];
+  matMul(gIKH, P_, gPn);
+  std::memcpy(P_, gPn, sizeof(float) * kN * kN);
+
+  injectError();
+}
+
 void GpsImuEskf::zeroVelocityUpdate() {
   correctVelocity(0.0f, 0.0f, 0.3f);
 }
@@ -349,8 +383,9 @@ void GpsImuEskf::onGpsFix(uint32_t t_ms, float lat, float lon, float speed_mps,
     const float vy_g = speed * std::cos(h);
     const float sig_v = kVelSigmaBase + 0.05f * speed;
     correctVelocity(vx_g, vy_g, sig_v);
-    // Soft heading nudge via yaw error injection (already in vel update coupling)
-    yaw_rad_ = wrapPi(yaw_rad_ + 0.15f * wrapPi(h - yaw_rad_));
+
+    const float sig_yaw = kYawSigmaBaseRad + kYawSigmaSpeedGain / speed;
+    correctYaw(h, sig_yaw);
   }
 
   last_fix_ms_ = t_ms;

@@ -1,7 +1,11 @@
 [Unit]
 Description=Proxy legacy KPP port 5000 to FastAPI port 8000
-Requires=kpp-port5000-proxy.socket
 After=kpp-dashboard.service
 
 [Service]
-ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8000
+ExecStart=/usr/bin/python3 /home/evan/kpp/infra/pi/port5000_proxy.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

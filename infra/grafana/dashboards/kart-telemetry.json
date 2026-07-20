@@ -54,7 +54,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 6,
+        "w": 3,
         "x": 0,
         "y": 1
       },
@@ -80,7 +80,70 @@
           "refId": "A"
         }
       ],
-      "title": "GPS 時速",
+      "title": "GPS 時速 (m/s)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 36
+              },
+              {
+                "color": "red",
+                "value": 72
+              }
+            ]
+          },
+          "unit": "velocitykmh",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
+      "id": 9,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"gps_speed_mps\")\n  |> last()\n  |> map(fn: (r) => ({ r with _value: r._value * 3.6 }))",
+          "refId": "A"
+        }
+      ],
+      "title": "GPS 時速 (km/h)",
       "type": "stat"
     },
     {
@@ -525,7 +588,35 @@
           },
           "unit": "velocitymps"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "GPS 時速 (km/h)"
+              },
+              {
+                "id": "unit",
+                "value": "velocitykmh"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 10,
@@ -556,6 +647,14 @@
           },
           "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value * 3.6, _field: \"gps_speed_kmh\" }))\n  |> yield(name: \"mean\")",
+          "refId": "B"
         }
       ],
       "title": "Speed",
@@ -1052,7 +1151,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> keep(columns: [\"_time\", \"a_lat\", \"a_lon\"])\n  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"az\" or r._field == \"mpu_ax\" or r._field == \"mpu_az\" or r._field == \"gy85_ax\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if exists r.a_lat then r.a_lat else if exists r.az then r.az else if exists r.mpu_az then r.mpu_az else if exists r.gy85_az then r.gy85_az else 0.0,\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az then 1 else 0,\n      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"a_lat\", \"a_lon\"])",
           "refId": "B"
         }
       ],
@@ -1107,7 +1206,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"az\" or r._field == \"mpu_ax\" or r._field == \"mpu_az\" or r._field == \"gy85_ax\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if exists r.a_lat then r.a_lat else if exists r.az then r.az else if exists r.mpu_az then r.mpu_az else if exists r.gy85_az then r.gy85_az else 0.0,\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az then 1 else 0,\n      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"a_lat\", \"a_lon\"])",
           "refId": "A"
         }
       ],
@@ -1183,7 +1282,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"decel_g\"])\n  |> last()",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"az\" or r._field == \"mpu_ax\" or r._field == \"mpu_az\" or r._field == \"gy85_ax\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if exists r.a_lat then r.a_lat else if exists r.az then r.az else if exists r.mpu_az then r.mpu_az else if exists r.gy85_az then r.gy85_az else 0.0,\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az then 1 else 0,\n      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"decel_g\"])\n  |> last()",
           "refId": "A"
         }
       ],
@@ -1246,7 +1345,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"decel_g\"])\n  |> max(column: \"decel_g\")",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"az\" or r._field == \"mpu_ax\" or r._field == \"mpu_az\" or r._field == \"gy85_ax\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if exists r.a_lat then r.a_lat else if exists r.az then r.az else if exists r.mpu_az then r.mpu_az else if exists r.gy85_az then r.gy85_az else 0.0,\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az then 1 else 0,\n      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"decel_g\"])\n  |> max(column: \"decel_g\")",
           "refId": "A"
         }
       ],
@@ -1309,7 +1408,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"grip_g\"])\n  |> last()",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"az\" or r._field == \"mpu_ax\" or r._field == \"mpu_az\" or r._field == \"gy85_ax\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if exists r.a_lat then r.a_lat else if exists r.az then r.az else if exists r.mpu_az then r.mpu_az else if exists r.gy85_az then r.gy85_az else 0.0,\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az then 1 else 0,\n      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"grip_g\"])\n  |> last()",
           "refId": "A"
         }
       ],
@@ -1372,7 +1471,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"grip_pct\"])\n  |> last()",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"az\" or r._field == \"mpu_ax\" or r._field == \"mpu_az\" or r._field == \"gy85_ax\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if exists r.a_lat then r.a_lat else if exists r.az then r.az else if exists r.mpu_az then r.mpu_az else if exists r.gy85_az then r.gy85_az else 0.0,\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az then 1 else 0,\n      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"grip_pct\"])\n  |> last()",
           "refId": "A"
         }
       ],
@@ -1466,7 +1565,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"decel_g\", \"grip_g\"])",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"az\" or r._field == \"mpu_ax\" or r._field == \"mpu_az\" or r._field == \"gy85_ax\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lat: if exists r.a_lat then r.a_lat else if exists r.az then r.az else if exists r.mpu_az then r.mpu_az else if exists r.gy85_az then r.gy85_az else 0.0,\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az then 1 else 0,\n      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n  |> map(fn: (r) => ({ r with\n      a_lat: if r.a_lat > 2.0 then 2.0 else if r.a_lat < -2.0 then -2.0 else r.a_lat,\n      a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon,\n  }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon) / 1.6 * 100.0,\n  }))\n  |> keep(columns: [\"_time\", \"decel_g\", \"grip_g\"])",
           "refId": "A"
         }
       ],
@@ -1553,7 +1652,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r.gps_fix == \"1\")\n  |> filter(fn: (r) => r._field == \"a_lon\" or r._field == \"gps_lat\" or r._field == \"gps_lon\")\n  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon and exists r.a_lon)\n  |> map(fn: (r) => ({ r with a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n  }))\n  |> filter(fn: (r) => r.decel_g >= 0.25)\n  |> keep(columns: [\"_time\", \"gps_lat\", \"gps_lon\", \"decel_g\"])\n  |> sort(columns: [\"_time\"])",
+          "query": "import \"math\"\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r.gps_fix == \"1\")\n  |> filter(fn: (r) => r._field == \"a_lon\" or r._field == \"ax\" or r._field == \"mpu_ax\" or r._field == \"gy85_ax\" or r._field == \"gps_lat\" or r._field == \"gps_lon\")\n  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with\n      a_lon: if exists r.a_lon then r.a_lon else if exists r.ax then r.ax else if exists r.mpu_ax then r.mpu_ax else if exists r.gy85_ax then r.gy85_ax else 0.0,\n      motion_ok: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax then 1 else 0,\n  }))\n  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon and r.motion_ok == 1)\n  |> map(fn: (r) => ({ r with a_lon: if r.a_lon > 2.0 then 2.0 else if r.a_lon < -2.0 then -2.0 else r.a_lon }))\n  |> map(fn: (r) => ({ r with\n      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n  }))\n  |> filter(fn: (r) => r.decel_g >= 0.25)\n  |> keep(columns: [\"_time\", \"gps_lat\", \"gps_lon\", \"decel_g\"])\n  |> sort(columns: [\"_time\"])",
           "refId": "A"
         }
       ],

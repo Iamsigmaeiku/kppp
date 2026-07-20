@@ -82,6 +82,13 @@ class AllTimeBestEntry:
 
 
 class InfluxReader:
+    # 目前現場只有 esp32-kart-01（ICM-42688 + GpsImuEskf）這台裝置會寫
+    # gps_track / dr_position 兩個量測，走線圖固定查這台；
+    # esp32-kart-02（GY-85/MPU6050）沒有跑 ESKF，沒有位置輸出。
+    # 日後如果每台實體卡丁車都各自掛一顆會回報位置的 ESP32，這裡要
+    # 改成「car_number → device_id」的對照表，不能再繼續寫死單一裝置。
+    _TRACK_DEVICE_ID = "esp32-kart-01"
+
     def __init__(
         self,
         config: InfluxConfig,
@@ -337,17 +344,15 @@ class InfluxReader:
         if not laps:
             return []
 
-        car_number = await self._resolve_car_number(session_id, transponder_id)
-        if not car_number:
+        if not await self._resolve_car_number(session_id, transponder_id):
+            # 這節沒有登記/綁定這支 transponder 的車號 → 沒有走線可看。
             return []
 
-        session_start = started_at_from_session_id(session_id)
-        if session_start is None:
-            session_start = laps[0].recorded_at - timedelta(seconds=laps[0].lap_time)
-        session_end = laps[-1].recorded_at + timedelta(seconds=1)
+        session_start = laps[0].recorded_at - timedelta(seconds=laps[0].lap_time + 2)
+        session_end = laps[-1].recorded_at + timedelta(seconds=2)
 
         points, source = await self._query_track_points(
-            car_number=car_number,
+            device_id=self._TRACK_DEVICE_ID,
             start=session_start,
             stop=session_end,
         )
@@ -395,14 +400,14 @@ class InfluxReader:
     async def _query_track_points(
         self,
         *,
-        car_number: str,
+        device_id: str,
         start: datetime,
         stop: datetime,
     ) -> tuple[list[TrackPoint], str]:
         gps_track = await self._fetch_track_points(
             measurement="gps_track",
             field_map={"lat": "lat", "lon": "lon"},
-            car_number=car_number,
+            device_id=device_id,
             start=start,
             stop=stop,
         )
@@ -412,7 +417,7 @@ class InfluxReader:
         dr_track = await self._fetch_track_points(
             measurement="dr_position",
             field_map={"lat_dr": "lat", "lon_dr": "lon"},
-            car_number=car_number,
+            device_id=device_id,
             start=start,
             stop=stop,
         )
@@ -422,7 +427,7 @@ class InfluxReader:
         raw_gps = await self._fetch_track_points(
             measurement="kart_telemetry",
             field_map={"gps_lat": "lat", "gps_lon": "lon"},
-            car_number=car_number,
+            device_id=device_id,
             start=start,
             stop=stop,
         )
@@ -433,7 +438,7 @@ class InfluxReader:
         *,
         measurement: str,
         field_map: dict[str, str],
-        car_number: str,
+        device_id: str,
         start: datetime,
         stop: datetime,
     ) -> list[TrackPoint]:
@@ -444,7 +449,7 @@ class InfluxReader:
         query = (
             f'from(bucket: "{self._config.bucket}") '
             f'|> range(start: time(v: "{start_iso}"), stop: time(v: "{stop_iso}")) '
-            f'|> filter(fn: (r) => r._measurement == "{measurement}" and r.car_id == "{car_number}") '
+            f'|> filter(fn: (r) => r._measurement == "{measurement}" and r.device_id == "{device_id}") '
             f"|> filter(fn: (r) => {field_filters}) "
             f'|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
             f'|> keep(columns: ["_time", {keep_columns}]) '

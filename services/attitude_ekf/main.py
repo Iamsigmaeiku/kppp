@@ -43,6 +43,11 @@ from(bucket:"{BUCKET}")
 '''
 
 
+# 單一樣本間隔異常大（重連/斷線後補資料）時，predict() 用這個上限夾住 dt，
+# 避免一次把姿態積分帶到離譜的地方。
+_MAX_SAMPLE_DT_SEC = 1.0
+
+
 def poll_loop(interval_sec: float = POLL_INTERVAL_SEC) -> None:
     if not INFLUX_TOKEN:
         raise SystemExit("INFLUX_TOKEN is empty — set it in .env")
@@ -51,10 +56,10 @@ def poll_loop(interval_sec: float = POLL_INTERVAL_SEC) -> None:
     query_api = client.query_api()
     write_api = client.write_api(write_options=SYNCHRONOUS)
 
-    ekf = AttitudeEKF()
+    # 每台裝置各自一份濾波器狀態，避免多車樣本依時間交錯進同一個濾波器互相污染。
+    ekfs: dict[str, AttitudeEKF] = {}
+    last_sample_ts: dict[str, datetime] = {}
     last_ts: datetime | None = None
-    latest_gx: float | None = None
-    latest_gy: float | None = None
 
     logger.info(
         "polling %s/%s -> %s @ %s (interval=%.3fs)",
@@ -68,9 +73,6 @@ def poll_loop(interval_sec: float = POLL_INTERVAL_SEC) -> None:
     try:
         while True:
             loop_started = time.perf_counter()
-
-            if latest_gx is not None and latest_gy is not None:
-                ekf.predict(latest_gx, latest_gy, interval_sec)
 
             tables = query_api.query(_flux_for_imu(last_ts))
             for table in tables:
@@ -87,19 +89,25 @@ def poll_loop(interval_sec: float = POLL_INTERVAL_SEC) -> None:
                     if None in (gx, gy, ax, ay, az):
                         continue
 
-                    latest_gx = float(gx)
-                    latest_gy = float(gy)
+                    device_id = str(record.values.get("device_id") or "unknown")
+                    ekf = ekfs.setdefault(device_id, AttitudeEKF())
+
+                    prev_ts = last_sample_ts.get(device_id)
+                    if prev_ts is not None:
+                        dt = (ts - prev_ts).total_seconds()
+                        if dt > 0.0:
+                            ekf.predict(float(gx), float(gy), min(dt, _MAX_SAMPLE_DT_SEC))
+                    last_sample_ts[device_id] = ts
+
                     roll, pitch = ekf.update(float(ax), float(ay), float(az))
 
                     point = (
                         Point(MEASUREMENT_ATTITUDE)
+                        .tag("device_id", device_id)
                         .field("roll_deg", float(roll * 57.29578))
                         .field("pitch_deg", float(pitch * 57.29578))
                         .time(ts, WritePrecision.NS)
                     )
-                    device_id = record.values.get("device_id")
-                    if device_id:
-                        point = point.tag("device_id", str(device_id))
 
                     write_api.write(bucket=BUCKET, record=point)
                     last_ts = ts

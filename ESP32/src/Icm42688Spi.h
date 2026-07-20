@@ -29,6 +29,15 @@
 #define ICM_MIN_ACCEL_MAG 0.2f
 #endif
 
+/**
+ * Reject implausible |a| spikes (SPI glitch / bad contact returning noise
+ * anywhere in the ±16g register range). Real kart dynamics (cornering,
+ * braking, curb strikes) stay well under this; sensor is rated to ±16g.
+ */
+#ifndef ICM_MAX_ACCEL_MAG
+#define ICM_MAX_ACCEL_MAG 8.0f
+#endif
+
 struct IcmSample {
   float ax, ay, az;       // g
   float gx, gy, gz;       // dps

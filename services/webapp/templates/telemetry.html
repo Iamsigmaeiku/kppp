@@ -72,7 +72,9 @@
     background: var(--border);
     margin: 0 0.15rem;
   }
-  .telemetry-timebar input[type="datetime-local"] {
+  .telemetry-timebar input[type="datetime-local"],
+  .telemetry-timebar input[type="date"],
+  .telemetry-timebar select {
     background: var(--panel);
     color: var(--text);
     border: 1px solid var(--border);
@@ -174,7 +176,15 @@
               x-text="q.label"></button>
     </template>
     <div class="sep" aria-hidden="true"></div>
-    <span class="label">回放</span>
+    <span class="label">選日期＋小時</span>
+    <input type="date" x-model="hourDate" @change="applyHourBlock()">
+    <select x-model="hourOfDay" @change="applyHourBlock()">
+      <template x-for="h in 24" :key="h">
+        <option :value="String(h - 1).padStart(2, '0')" x-text="String(h - 1).padStart(2, '0') + ':00'"></option>
+      </template>
+    </select>
+    <div class="sep" aria-hidden="true"></div>
+    <span class="label">回放（精細）</span>
     <input type="datetime-local" step="60" x-model="customFrom">
     <span style="color:var(--text-faint);font-size:0.8rem;">→</span>
     <input type="datetime-local" step="60" x-model="customTo">
@@ -215,6 +225,8 @@ function telemetryPage() {
     liveId: '15m',
     customFrom: '',
     customTo: '',
+    hourDate: '',
+    hourOfDay: '00',
     iframeSrc: '',
     quickRanges: [
       { id: '5m', label: '5m', from: 'now-5m', to: 'now' },
@@ -337,10 +349,23 @@ function telemetryPage() {
       this.liveId = '';
       this.iframeSrc = this.buildUrl(String(fromMs), String(toMs), 'off');
     },
+    applyHourBlock() {
+      if (!this.hourDate) return;
+      const fromMs = this.parseLocalInput(`${this.hourDate}T${this.hourOfDay}:00`);
+      if (!Number.isFinite(fromMs)) return;
+      const toMs = fromMs + 60 * 60 * 1000;
+      this.mode = 'replay';
+      this.liveId = '';
+      this.customFrom = this.localInputValue(fromMs);
+      this.customTo = this.localInputValue(toMs);
+      this.iframeSrc = this.buildUrl(String(fromMs), String(toMs), 'off');
+    },
     initDefaults() {
       const now = Date.now();
       this.customTo = this.localInputValue(now);
       this.customFrom = this.localInputValue(now - 60 * 60 * 1000);
+      this.hourDate = this.localInputValue(now).slice(0, 10);
+      this.hourOfDay = this.localInputValue(now).slice(11, 13);
       this.setLive('15m');
     },
     async poll() {

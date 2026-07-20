@@ -59,6 +59,11 @@ THR_SPD = [
     {"color": "yellow", "value": 10},
     {"color": "red", "value": 20},
 ]
+THR_SPD_KMH = [
+    {"color": "green", "value": None},
+    {"color": "yellow", "value": 36},
+    {"color": "red", "value": 72},
+]
 THR_SATS = [
     {"color": "red", "value": None},
     {"color": "yellow", "value": 4},
@@ -149,6 +154,30 @@ def flux_ts(fields: list[str], *, agg: str = "mean") -> str:
     )
 
 
+def flux_last_scaled(field: str, factor: float) -> str:
+    """單一最新值乘上係數（m/s → km/h 之類的單位換算）。"""
+    return (
+        flux_last(field)
+        + f"\n  |> map(fn: (r) => ({{ r with _value: r._value * {factor} }}))"
+    )
+
+
+def flux_ts_scaled(
+    field: str, factor: float, *, new_field: str, agg: str = "mean"
+) -> str:
+    """時序資料乘上係數並改名 _field，讓 Grafana 可以獨立套用單位/顏色。"""
+    return (
+        f'from(bucket: "{BUCKET}")\n'
+        f"  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n"
+        f'  |> filter(fn: (r) => r._measurement == "kart_telemetry"'
+        f' and r.device_id == "{DEVICE_VAR}" and r._field == "{field}")\n'
+        f"  |> aggregateWindow(every: v.windowPeriod, fn: {agg}, createEmpty: false)\n"
+        f'  |> map(fn: (r) => ({{ r with _value: r._value * {factor},'
+        f' _field: "{new_field}" }}))\n'
+        f'  |> yield(name: "{agg}")'
+    )
+
+
 def flux_gps_path(device_id: str) -> str:
     return (
         f'from(bucket: "{BUCKET}")\n'
@@ -205,10 +234,29 @@ def flux_motion_derived(*, keep: list[str], every: str = "v.windowPeriod") -> st
         f"  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n"
         f'  |> filter(fn: (r) => r._measurement == "kart_telemetry"'
         f' and r.device_id == "{DEVICE_VAR}")\n'
-        f'  |> filter(fn: (r) => r._field == "a_lat" or r._field == "a_lon")\n'
+        f'  |> filter(fn: (r) => r._field == "a_lat" or r._field == "a_lon"'
+        f' or r._field == "ax" or r._field == "az"'
+        f' or r._field == "mpu_ax" or r._field == "mpu_az"'
+        f' or r._field == "gy85_ax" or r._field == "gy85_az")\n'
         f"  |> aggregateWindow(every: {every}, fn: last, createEmpty: false)\n"
         f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
-        f"  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)\n"
+        f"  |> map(fn: (r) => ({{ r with\n"
+        f"      a_lat: if exists r.a_lat then r.a_lat"
+        f" else if exists r.az then r.az"
+        f" else if exists r.mpu_az then r.mpu_az"
+        f" else if exists r.gy85_az then r.gy85_az"
+        f" else 0.0,\n"
+        f"      a_lon: if exists r.a_lon then r.a_lon"
+        f" else if exists r.ax then r.ax"
+        f" else if exists r.mpu_ax then r.mpu_ax"
+        f" else if exists r.gy85_ax then r.gy85_ax"
+        f" else 0.0,\n"
+        f"      motion_ok: if exists r.a_lat or exists r.az or exists r.mpu_az or exists r.gy85_az"
+        f" then 1 else 0,\n"
+        f"      motion_ok2: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax"
+        f" then 1 else 0,\n"
+        f"  }}))\n"
+        f"  |> filter(fn: (r) => r.motion_ok == 1 and r.motion_ok2 == 1)\n"
         f"{_flux_g_norm()}"
         f"  |> map(fn: (r) => ({{ r with\n"
         f"      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n"
@@ -228,11 +276,21 @@ def flux_decel_markers() -> str:
         f"  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n"
         f'  |> filter(fn: (r) => r._measurement == "kart_telemetry"'
         f' and r.device_id == "{DEVICE_VAR}" and r.gps_fix == "1")\n'
-        f'  |> filter(fn: (r) => r._field == "a_lon" or r._field == "gps_lat"'
-        f' or r._field == "gps_lon")\n'
+        f'  |> filter(fn: (r) => r._field == "a_lon" or r._field == "ax"'
+        f' or r._field == "mpu_ax" or r._field == "gy85_ax"'
+        f' or r._field == "gps_lat" or r._field == "gps_lon")\n'
         f"  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n"
         f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
-        f"  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon and exists r.a_lon)\n"
+        f"  |> map(fn: (r) => ({{ r with\n"
+        f"      a_lon: if exists r.a_lon then r.a_lon"
+        f" else if exists r.ax then r.ax"
+        f" else if exists r.mpu_ax then r.mpu_ax"
+        f" else if exists r.gy85_ax then r.gy85_ax"
+        f" else 0.0,\n"
+        f"      motion_ok: if exists r.a_lon or exists r.ax or exists r.mpu_ax or exists r.gy85_ax"
+        f" then 1 else 0,\n"
+        f"  }}))\n"
+        f"  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon and r.motion_ok == 1)\n"
         f"  |> map(fn: (r) => ({{ r with a_lon: if r.a_lon > {_G_CLAMP_G} then {_G_CLAMP_G}"
         f" else if r.a_lon < -{_G_CLAMP_G} then -{_G_CLAMP_G} else r.a_lon }}))\n"
         f"  |> map(fn: (r) => ({{ r with\n"
@@ -428,6 +486,7 @@ def panel_ts(
     unit: str = "none",
     agg: str = "mean",
     overrides: list[dict] | None = None,
+    extra_targets: list[dict] | None = None,
 ) -> dict:
     return {
         "datasource": DS,
@@ -451,7 +510,10 @@ def panel_ts(
             "legend": {"calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom"},
             "tooltip": {"mode": "multi", "sort": "none"},
         },
-        "targets": [{"datasource": DS, "query": flux_ts(fields, agg=agg), "refId": "A"}],
+        "targets": [
+            {"datasource": DS, "query": flux_ts(fields, agg=agg), "refId": "A"},
+            *(extra_targets or []),
+        ],
         "title": title,
         "type": "timeseries",
     }
@@ -542,18 +604,7 @@ def panel_grip(pid: int, x: int, y: int) -> dict:
             },
             {
                 "datasource": DS,
-                "query": (
-                    f'from(bucket: "{BUCKET}")\n'
-                    f"  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n"
-                    f'  |> filter(fn: (r) => r._measurement == "kart_telemetry"'
-                    f' and r.device_id == "{DEVICE_VAR}")\n'
-                    f'  |> filter(fn: (r) => r._field == "a_lat" or r._field == "a_lon")\n'
-                    f"  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n"
-                    f'  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")\n'
-                    f"{_flux_g_norm()}"
-                    f'  |> keep(columns: ["_time", "a_lat", "a_lon"])\n'
-                    f"  |> filter(fn: (r) => exists r.a_lat and exists r.a_lon)"
-                ),
+                "query": flux_motion_derived(keep=["a_lat", "a_lon"]),
                 "refId": "B",
             },
         ],
@@ -781,7 +832,18 @@ def make_kart_telemetry() -> dict:
     #   Fleet     y=82..104 dual speed + dual geomap
     panels: list[dict] = [
         panel_row(100, "Overview", 0),
-        panel_stat(1, "GPS 時速", "gps_speed_mps", 0, 1, w=6, h=6, unit="velocitymps", thresholds=THR_SPD),
+        panel_stat(1, "GPS 時速 (m/s)", "gps_speed_mps", 0, 1, w=3, h=6, unit="velocitymps", thresholds=THR_SPD),
+        panel_stat_query(
+            9,
+            "GPS 時速 (km/h)",
+            flux_last_scaled("gps_speed_mps", 3.6),
+            3,
+            1,
+            w=3,
+            h=6,
+            unit="velocitykmh",
+            thresholds=THR_SPD_KMH,
+        ),
         panel_stat(2, "衛星", "gps_satellites", 6, 1, w=6, h=6, unit="none", thresholds=THR_SATS),
         panel_stat(3, "HDOP", "gps_hdop", 12, 1, w=6, h=6, unit="none", thresholds=THR_HDOP),
         panel_stat(4, "航向", "gps_course_deg", 18, 1, w=6, h=6, unit="degree"),
@@ -800,6 +862,26 @@ def make_kart_telemetry() -> dict:
             h=10,
             unit="velocitymps",
             agg="mean",
+            extra_targets=[
+                {
+                    "datasource": DS,
+                    "query": flux_ts_scaled(
+                        "gps_speed_mps", 3.6, new_field="gps_speed_kmh", agg="mean"
+                    ),
+                    "refId": "B",
+                },
+            ],
+            overrides=[
+                {
+                    "matcher": {"id": "byFrameRefID", "options": "B"},
+                    "properties": [
+                        {"id": "displayName", "value": "GPS 時速 (km/h)"},
+                        {"id": "unit", "value": "velocitykmh"},
+                        {"id": "custom.axisPlacement", "value": "right"},
+                        {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
+                    ],
+                },
+            ],
         ),
         panel_ts(
             13,
@@ -838,15 +920,14 @@ def make_kart_telemetry() -> dict:
         ),
         panel_ts(23, "Yaw rate (gz)", ["gz"], 12, 46, h=11, unit="dps", agg="max"),
         panel_grip(24, 0, 57),
-        panel_ts(
+        panel_ts_query(
             25,
             "G lateral / longitudinal",
-            ["a_lat", "a_lon"],
+            flux_motion_derived(keep=["a_lat", "a_lon"]),
             12,
             57,
             h=11,
             unit="accG",
-            agg="max",
         ),
         panel_row(105, "煞車與抓地力", 68),
         panel_stat_query(

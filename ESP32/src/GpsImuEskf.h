@@ -89,6 +89,7 @@ class GpsImuEskf {
   void predictCov(float dt, float a_fwd_mps2, float a_lat_mps2);
   void correctPosition(float x_gps, float y_gps, float sigma_m);
   void correctVelocity(float vx_gps, float vy_gps, float sigma_mps);
+  void correctYaw(float yaw_gps_rad, float sigma_rad);
   void injectError();
   void zeroVelocityUpdate();
   EskfOutput makeOutput(bool valid) const;
