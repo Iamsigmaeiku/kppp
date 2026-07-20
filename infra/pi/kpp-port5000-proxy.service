@@ -1,0 +1,7 @@
+[Unit]
+Description=Proxy legacy KPP port 5000 to FastAPI port 8000
+Requires=kpp-port5000-proxy.socket
+After=kpp-dashboard.service
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8000

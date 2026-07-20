@@ -1,0 +1,12 @@
+{
+  "in_sample_mae_sec": 16.705978393554688,
+  "out_of_sample_mae_sec": 5.945498943328857,
+  "mae_gap_sec": -10.76047945022583,
+  "mae_ratio": 0.35589049639994047,
+  "split_mode": "holdout",
+  "n_windows": 831,
+  "n_laps": 15,
+  "n_sessions": 4,
+  "data_enough_for_prod": false,
+  "data_enough_for_pipeline_check": true
+}

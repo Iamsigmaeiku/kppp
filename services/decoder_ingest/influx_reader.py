@@ -285,11 +285,14 @@ class InfluxReader:
         """依 transponder 分組取每人歷史最佳圈速（跨所有已歸檔場次），
         由快到慢排序、取前 N 筆——全站排行榜的資料來源。
         """
+        import os
+
+        min_lap = float(os.getenv("LEADERBOARD_MIN_LAP_SEC", "35.0"))
         query = (
             f'from(bucket: "{self._config.bucket}") '
             f"|> range(start: {range_start}) "
             f'|> filter(fn: (r) => r._measurement == "{self._archive_measurement}" '
-            f'and r._field == "best_lap_time" and r._value > 0.0) '
+            f'and r._field == "best_lap_time" and r._value >= {min_lap:.3f}) '
             f'|> group(columns: ["transponder_id", "car_number"]) '
             f'|> min(column: "_value") '
             f'|> group() '

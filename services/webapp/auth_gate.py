@@ -19,6 +19,8 @@ _WHITELIST_PREFIXES = (
     "/api/auth/",
     "/api/telemetry/ingest",  # ESP32 Bearer token，不是瀏覽器 session
     "/api/session/reset",  # 自帶 X-Session-Reset-Token，場務收場用
+    "/health",  # keepalived / deploy 健康檢查
+    "/version",  # deploy 確認 VIP 背後版本
     "/webapp-static/",
     "/docs",
     "/openapi.json",

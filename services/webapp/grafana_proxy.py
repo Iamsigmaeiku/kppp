@@ -10,6 +10,9 @@ import os
 import httpx
 from fastapi import APIRouter, Request, Response
 
+from .deps import get_current_user
+from .telemetry_access import can_view_telemetry
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -71,6 +74,9 @@ async def _proxy_http(request: Request, path: str) -> Response:
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
 )
 async def grafana_http_proxy(request: Request, path: str = "") -> Response:
+    user = await get_current_user(request)
+    if not can_view_telemetry(user):
+        return Response(content="telemetry access denied", status_code=403)
     try:
         return await _proxy_http(request, path)
     except httpx.HTTPError as exc:

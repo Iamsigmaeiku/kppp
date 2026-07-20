@@ -1,0 +1,16 @@
+[Unit]
+Description=KPP Dashboard (decoder_ingest + FastAPI webapp)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/kpp
+EnvironmentFile=-%h/kpp/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/kpp/.venv/bin/python -m services.decoder_ingest.main --with-dashboard
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

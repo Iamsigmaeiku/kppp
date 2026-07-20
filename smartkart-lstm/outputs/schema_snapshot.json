@@ -1,0 +1,333 @@
+{
+  "discovered_at": "2026-07-19T09:44:20.690180+00:00",
+  "url": "http://100.102.122.104:8086",
+  "org": "kpp",
+  "bucket": "decoder",
+  "measurements": {
+    "attitude": {
+      "fields": [
+        "pitch_deg",
+        "roll_deg"
+      ],
+      "tags": [
+        "device_id"
+      ],
+      "tag_values_sample": {
+        "device_id": [
+          "esp32-kart-01"
+        ]
+      },
+      "time_range": {
+        "count": 9287,
+        "first": "2026-07-14T08:20:16.014000+00:00",
+        "last": "2026-07-15T10:09:58.460144+00:00",
+        "days": 1.076,
+        "count_field": "pitch_deg"
+      },
+      "hz": {
+        "median_hz": 25.0,
+        "p95_dt_ms": 42.0,
+        "median_dt_ms": 40.0,
+        "n_intervals": 4998,
+        "sample_field": "pitch_deg"
+      }
+    },
+    "decoder_raw_events": {
+      "fields": [
+        "best_lap_time",
+        "car_number",
+        "lap_count",
+        "last_lap_time",
+        "raw_ascii",
+        "raw_hex",
+        "registered",
+        "transponder_id"
+      ],
+      "tags": [
+        "decoder_id",
+        "event_type",
+        "session_id"
+      ],
+      "tag_values_sample": {
+        "event_type": [
+          "passing"
+        ],
+        "session_id": [
+          "sess-20260710-082947",
+          "sess-20260711-133011",
+          "sess-20260712-022003",
+          "sess-20260712-040531",
+          "sess-20260712-052244",
+          "sess-20260712-060534",
+          "sess-20260712-065732",
+          "sess-20260712-072252",
+          "sess-20260712-080807",
+          "sess-20260712-084328",
+          "sess-20260712-091634",
+          "sess-20260713-033133",
+          "sess-20260713-043246",
+          "sess-20260713-054922",
+          "sess-20260713-064026",
+          "sess-20260713-070821",
+          "sess-20260713-073232",
+          "sess-20260713-080724",
+          "sess-20260713-084412",
+          "sess-20260714-010751",
+          "sess-20260714-070938",
+          "sess-20260714-073817",
+          "sess-20260714-081018",
+          "sess-20260714-084530",
+          "sess-20260714-160000",
+          "sess-20260715-025609",
+          "sess-20260715-035914",
+          "sess-20260715-043035",
+          "sess-20260715-051017",
+          "sess-20260715-062838",
+          "sess-20260715-072108",
+          "sess-20260715-080653",
+          "sess-20260715-082346",
+          "sess-20260715-092120",
+          "sess-20260715-102232",
+          "sess-20260715-105624",
+          "sess-20260715-113008",
+          "sess-20260715-121023",
+          "sess-20260715-160000",
+          "sess-20260716-031902"
+        ]
+      },
+      "time_range": {
+        "count": 1927,
+        "first": "2026-07-10T09:03:59.082911+00:00",
+        "last": "2026-07-10T09:14:28.245401+00:00",
+        "days": 0.007,
+        "count_field": "last_lap_time"
+      },
+      "hz": {
+        "median_hz": 0.34,
+        "p95_dt_ms": 8983.57,
+        "median_dt_ms": 2905.87,
+        "n_intervals": 1055,
+        "sample_field": "last_lap_time"
+      }
+    },
+    "dr_position": {
+      "fields": [
+        "heading_deg",
+        "lat_dr",
+        "lon_dr",
+        "speed_mps"
+      ],
+      "tags": [
+        "device_id"
+      ],
+      "tag_values_sample": {
+        "device_id": [
+          "esp32-kart-01"
+        ]
+      },
+      "time_range": {
+        "count": 5730,
+        "first": "2026-07-15T07:50:30.355000+00:00",
+        "last": "2026-07-15T08:03:07.165000+00:00",
+        "days": 0.009,
+        "count_field": "lat_dr"
+      },
+      "hz": {
+        "median_hz": 50.0,
+        "p95_dt_ms": 22.0,
+        "median_dt_ms": 20.0,
+        "n_intervals": 4993,
+        "sample_field": "lat_dr"
+      }
+    },
+    "kart_telemetry": {
+      "fields": [
+        "a_lat",
+        "a_lon",
+        "accel_dyn",
+        "accel_mag",
+        "ax",
+        "ay",
+        "az",
+        "dht_humidity",
+        "dht_temp_c",
+        "gps_alt_m",
+        "gps_course_deg",
+        "gps_fresh",
+        "gps_hdop",
+        "gps_lat",
+        "gps_lon",
+        "gps_satellites",
+        "gps_speed_mps",
+        "gx",
+        "gy",
+        "gz",
+        "hall_adc",
+        "hall_hz",
+        "imu_temp_c"
+      ],
+      "tags": [
+        "device_id",
+        "gps_fix"
+      ],
+      "tag_values_sample": {
+        "device_id": [
+          "esp32-kart-01",
+          "esp32-kart-02",
+          "probe",
+          "probe-public"
+        ]
+      },
+      "time_range": {
+        "count": 288876,
+        "first": "2026-07-10T08:22:36.933985+00:00",
+        "last": "2026-07-16T07:28:02.039000+00:00",
+        "days": 5.962,
+        "count_field": "ax"
+      },
+      "hz": {
+        "median_hz": 25.0,
+        "p95_dt_ms": 2050.0,
+        "median_dt_ms": 40.0,
+        "n_intervals": 4984,
+        "sample_field": "ax"
+      }
+    },
+    "position_est": {
+      "fields": [
+        "heading_deg",
+        "lat_est",
+        "lon_est",
+        "speed_mps"
+      ],
+      "tags": [
+        "device_id",
+        "source"
+      ],
+      "tag_values_sample": {
+        "device_id": [
+          "esp32-kart-01"
+        ]
+      },
+      "time_range": {
+        "count": 59405,
+        "first": "2026-07-13T04:11:31.559000+00:00",
+        "last": "2026-07-15T10:32:44.791000+00:00",
+        "days": 2.265,
+        "count_field": "speed_mps"
+      },
+      "hz": {
+        "median_hz": 24.39,
+        "p95_dt_ms": 1747.0,
+        "median_dt_ms": 41.0,
+        "n_intervals": 4991,
+        "sample_field": "speed_mps"
+      }
+    },
+    "session_archive": {
+      "fields": [
+        "best_lap_time",
+        "lap_count",
+        "lap_history_json",
+        "last_lap_time",
+        "registered",
+        "reset_trigger",
+        "session_started_at"
+      ],
+      "tags": [
+        "car_number",
+        "session_id",
+        "transponder_id"
+      ],
+      "tag_values_sample": {
+        "session_id": [
+          "sess-20260710-082947",
+          "sess-20260711-133011",
+          "sess-20260712-033531",
+          "sess-20260712-040531",
+          "sess-20260712-045244",
+          "sess-20260712-052244",
+          "sess-20260712-060534",
+          "sess-20260712-065732",
+          "sess-20260712-072252",
+          "sess-20260712-080807",
+          "sess-20260712-084328",
+          "sess-20260712-091634",
+          "sess-20260713-033133",
+          "sess-20260713-043246",
+          "sess-20260713-054922",
+          "sess-20260713-064026",
+          "sess-20260713-070821",
+          "sess-20260713-073232",
+          "sess-20260713-080724",
+          "sess-20260713-084412",
+          "sess-20260714-010751",
+          "sess-20260714-070938",
+          "sess-20260714-073817",
+          "sess-20260714-081018",
+          "sess-20260714-084530",
+          "sess-20260714-160000",
+          "sess-20260715-025609",
+          "sess-20260715-035914",
+          "sess-20260715-043035",
+          "sess-20260715-051017",
+          "sess-20260715-062838",
+          "sess-20260715-072108",
+          "sess-20260715-080653",
+          "sess-20260715-082346",
+          "sess-20260715-092120",
+          "sess-20260715-102232",
+          "sess-20260715-105624",
+          "sess-20260715-113008",
+          "sess-20260715-121023",
+          "sess-20260715-160000"
+        ],
+        "transponder_id": [
+          "140201B81B76",
+          "140201B81B77",
+          "140201B81B7C",
+          "140201B81B7D",
+          "14020FBE8377",
+          "140210998E77",
+          "140210998E7D",
+          "140210A5F077",
+          "140210B98377",
+          "140210B9837C",
+          "140210B9837D",
+          "140210D7E876",
+          "140210D7E877",
+          "140210D7E87D",
+          "140210E3C477",
+          "140211084277",
+          "14021108427C",
+          "14021108427D",
+          "140211241C6E",
+          "140211241C77",
+          "140211241C7D",
+          "14021124C876",
+          "14021124C877",
+          "14021124C87C",
+          "14021124C87D",
+          "14021144A177",
+          "140215359577",
+          "140215494F77",
+          "140215494F7C",
+          "140287D7BC7D",
+          "148210E3C477"
+        ]
+      },
+      "time_range": {
+        "count": 163,
+        "first": "2026-07-12T04:41:46.733086+00:00",
+        "last": "2026-07-12T04:41:46.733086+00:00",
+        "days": 0.0,
+        "count_field": "last_lap_time"
+      },
+      "hz": {
+        "median_hz": null,
+        "p95_dt_ms": null,
+        "n_intervals": 0
+      }
+    }
+  }
+}

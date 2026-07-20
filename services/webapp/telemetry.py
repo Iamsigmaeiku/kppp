@@ -1,6 +1,7 @@
 """ESP32 遙測 ingest：Bearer token 驗證後寫入 InfluxDB measurement kart_telemetry。
 
 若 sample 含 DR 欄位，另寫 measurement dr_position（不覆蓋 gps_* raw）。
+若 sample 含 gps_tracks[]，另寫 measurement gps_track（tag device=m10180c|neo6m）。
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from influxdb_client import Point
@@ -21,6 +22,20 @@ router = APIRouter(prefix="/api/telemetry")
 
 MEASUREMENT = "kart_telemetry"
 MEASUREMENT_DR = "dr_position"
+MEASUREMENT_GPS_TRACK = "gps_track"
+
+
+class GpsTrackFix(BaseModel):
+    """Dual-GPS Route：同一 measurement，用 device tag 分線。"""
+
+    device: Literal["m10180c", "neo6m"]
+    lat: float
+    lon: float
+    alt: float | None = None
+    speed_mps: float | None = None
+    course_deg: float | None = None
+    hdop: float | None = None
+    sats: int | None = None
 
 
 class TelemetrySample(BaseModel):
@@ -32,6 +47,9 @@ class TelemetrySample(BaseModel):
     gz: float | None = None
     imu_temp_c: float | None = None
     accel_mag: float | None = None
+    accel_dyn: float | None = None  # |a - g| after LPF gravity removal
+    a_lon: float | None = None  # horizontal dynamical (X when gravity≈+Y)
+    a_lat: float | None = None  # horizontal dynamical (Z when gravity≈+Y)
     dht_temp_c: float | None = None
     dht_humidity: float | None = None
     gps_lat: float | None = None
@@ -41,12 +59,31 @@ class TelemetrySample(BaseModel):
     gps_alt_m: float | None = None
     gps_hdop: float | None = None
     gps_satellites: int | None = None
-    hall_adc: float | None = None
-    hall_hz: float | None = None
+    gps_fresh: float | None = None  # 1=fresh fix, 0=held stale
+    # GY-85 (ADXL345+ITG3205+HMC5883L) — esp32-kart-02 / esp32-imu2-gps
+    gy85_ax: float | None = None
+    gy85_ay: float | None = None
+    gy85_az: float | None = None
+    gy85_gx: float | None = None
+    gy85_gy: float | None = None
+    gy85_gz: float | None = None
+    gy85_mx: float | None = None
+    gy85_my: float | None = None
+    gy85_mz: float | None = None
+    gy85_heading_deg: float | None = None
+    # MPU6050 GY-521 @0x69
+    mpu_ax: float | None = None
+    mpu_ay: float | None = None
+    mpu_az: float | None = None
+    mpu_gx: float | None = None
+    mpu_gy: float | None = None
+    mpu_gz: float | None = None
+    mpu_temp_c: float | None = None
     lat_dr: float | None = None
     lon_dr: float | None = None
     dr_heading_deg: float | None = None
     dr_speed_mps: float | None = None
+    gps_tracks: list[GpsTrackFix] | None = None
     ts_ms: int | None = None
 
 
@@ -73,19 +110,27 @@ def _sample_time(sample: TelemetrySample) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _is_fake_zero_imu(sample: TelemetrySample) -> bool:
+    """DHT/GPS-only placeholder：ax=ay=az=0（或缺）且 accel_mag≈0 → 不要灌假零進 Influx。"""
+    ax, ay, az = sample.ax, sample.ay, sample.az
+    if ax is None and ay is None and az is None and sample.accel_mag is None:
+        return False  # 根本沒送 IMU；下面也不會寫
+    vals = [v for v in (ax, ay, az) if v is not None]
+    if vals and any(abs(v) > 1e-6 for v in vals):
+        return False
+    if sample.accel_mag is not None and abs(sample.accel_mag) > 1e-6:
+        return False
+    # 全 0 或只送了 0
+    return bool(vals) or (sample.accel_mag is not None and abs(sample.accel_mag) <= 1e-6)
+
+
 def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample) -> Point:
     point = Point(MEASUREMENT).tag("device_id", device_id)
     if car_id:
         point = point.tag("car_id", car_id)
 
+    skip_imu = _is_fake_zero_imu(sample)
     fields: dict[str, Any] = {
-        "ax": sample.ax,
-        "ay": sample.ay,
-        "az": sample.az,
-        "gx": sample.gx,
-        "gy": sample.gy,
-        "gz": sample.gz,
-        "imu_temp_c": sample.imu_temp_c,
         "dht_temp_c": sample.dht_temp_c,
         "dht_humidity": sample.dht_humidity,
         "gps_lat": sample.gps_lat,
@@ -95,19 +140,62 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
         "gps_alt_m": sample.gps_alt_m,
         "gps_hdop": sample.gps_hdop,
         "gps_satellites": sample.gps_satellites,
-        "hall_adc": sample.hall_adc,
-        "hall_hz": sample.hall_hz,
+        "gps_fresh": sample.gps_fresh,
+        # GY-85 / MPU6050：獨立感測器，不進 skip_imu
+        "gy85_ax": sample.gy85_ax,
+        "gy85_ay": sample.gy85_ay,
+        "gy85_az": sample.gy85_az,
+        "gy85_gx": sample.gy85_gx,
+        "gy85_gy": sample.gy85_gy,
+        "gy85_gz": sample.gy85_gz,
+        "gy85_mx": sample.gy85_mx,
+        "gy85_my": sample.gy85_my,
+        "gy85_mz": sample.gy85_mz,
+        "gy85_heading_deg": sample.gy85_heading_deg,
+        "mpu_ax": sample.mpu_ax,
+        "mpu_ay": sample.mpu_ay,
+        "mpu_az": sample.mpu_az,
+        "mpu_gx": sample.mpu_gx,
+        "mpu_gy": sample.mpu_gy,
+        "mpu_gz": sample.mpu_gz,
+        "mpu_temp_c": sample.mpu_temp_c,
     }
-    accel_mag = sample.accel_mag
-    if accel_mag is None and sample.ax is not None and sample.ay is not None and sample.az is not None:
-        accel_mag = math.sqrt(sample.ax**2 + sample.ay**2 + sample.az**2)
-    fields["accel_mag"] = accel_mag
+    if not skip_imu:
+        fields.update(
+            {
+                "ax": sample.ax,
+                "ay": sample.ay,
+                "az": sample.az,
+                "gx": sample.gx,
+                "gy": sample.gy,
+                "gz": sample.gz,
+                "imu_temp_c": sample.imu_temp_c,
+                "accel_dyn": sample.accel_dyn,
+                "a_lon": sample.a_lon,
+                "a_lat": sample.a_lat,
+            }
+        )
+        accel_mag = sample.accel_mag
+        if (
+            accel_mag is None
+            and sample.ax is not None
+            and sample.ay is not None
+            and sample.az is not None
+        ):
+            accel_mag = math.sqrt(sample.ax**2 + sample.ay**2 + sample.az**2)
+        fields["accel_mag"] = accel_mag
 
     for key, value in fields.items():
         if value is not None:
             point = point.field(key, float(value))
 
-    if sample.gps_lat is not None and sample.gps_lon is not None:
+    # 只標真 fresh fix（gps_fresh>=0.5）；None/0 不當 gps_fix，避免 50Hz 重複點
+    if (
+        sample.gps_lat is not None
+        and sample.gps_lon is not None
+        and sample.gps_fresh is not None
+        and sample.gps_fresh >= 0.5
+    ):
         point = point.tag("gps_fix", "1")
 
     return point.time(_sample_time(sample))
@@ -131,6 +219,38 @@ def _sample_to_dr_point(
     return point.time(_sample_time(sample))
 
 
+def _gps_track_points(
+    device_id: str, car_id: str | None, sample: TelemetrySample
+) -> list[Point]:
+    """Hybrid dual-GPS：每顆模組獨立 Point，tag device + device_id。"""
+    if not sample.gps_tracks:
+        return []
+    ts = _sample_time(sample)
+    points: list[Point] = []
+    for fix in sample.gps_tracks:
+        point = (
+            Point(MEASUREMENT_GPS_TRACK)
+            .tag("device_id", device_id)
+            .tag("device", fix.device)
+            .field("lat", float(fix.lat))
+            .field("lon", float(fix.lon))
+        )
+        if car_id:
+            point = point.tag("car_id", car_id)
+        if fix.alt is not None:
+            point = point.field("alt", float(fix.alt))
+        if fix.speed_mps is not None:
+            point = point.field("speed", float(fix.speed_mps))
+        if fix.course_deg is not None:
+            point = point.field("course", float(fix.course_deg))
+        if fix.hdop is not None:
+            point = point.field("hdop", float(fix.hdop))
+        if fix.sats is not None:
+            point = point.field("sats", float(fix.sats))
+        points.append(point.time(ts))
+    return points
+
+
 @router.post("/ingest")
 async def ingest_telemetry(
     request: Request,
@@ -146,7 +266,7 @@ async def ingest_telemetry(
         dr_pt = _sample_to_dr_point(body.device_id, body.car_id, s)
         if dr_pt is not None:
             points.append(dr_pt)
-
+        points.extend(_gps_track_points(body.device_id, body.car_id, s))
     client = InfluxDBClientAsync(
         url=influx_cfg.url, token=influx_cfg.token, org=influx_cfg.org
     )
@@ -161,17 +281,37 @@ async def ingest_telemetry(
 
     # 快取最後一包（全域 + per-device），給 /telemetry 狀態列用
     last = body.samples[-1]
-    entry = {
-        "device_id": body.device_id,
-        "car_id": body.car_id,
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "sample": last.model_dump(),
-    }
-    request.app.state.telemetry_last = entry
+    sample_dict = last.model_dump()
     by_device = getattr(request.app.state, "telemetry_by_device", None)
     if not isinstance(by_device, dict):
         by_device = {}
         request.app.state.telemetry_by_device = by_device
+
+    # IMU 抽樣常夾不到當下 GPS 欄位：保留上一包 GPS，避免狀態列狂閃「尚未定位」
+    prev = by_device.get(body.device_id)
+    if sample_dict.get("gps_lat") is None and isinstance(prev, dict):
+        prev_sample = prev.get("sample") or {}
+        if isinstance(prev_sample, dict) and prev_sample.get("gps_lat") is not None:
+            for k in (
+                "gps_lat",
+                "gps_lon",
+                "gps_speed_mps",
+                "gps_course_deg",
+                "gps_alt_m",
+                "gps_hdop",
+                "gps_satellites",
+                "gps_fresh",
+            ):
+                if sample_dict.get(k) is None and prev_sample.get(k) is not None:
+                    sample_dict[k] = prev_sample[k]
+
+    entry = {
+        "device_id": body.device_id,
+        "car_id": body.car_id,
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "sample": sample_dict,
+    }
+    request.app.state.telemetry_last = entry
     by_device[body.device_id] = entry
 
     return {"status": "ok", "written": len(points)}
@@ -179,6 +319,13 @@ async def ingest_telemetry(
 
 @router.get("/status")
 async def telemetry_status(request: Request) -> dict:
+    from .deps import get_current_user
+    from .telemetry_access import can_view_telemetry
+
+    user = await get_current_user(request)
+    if not can_view_telemetry(user):
+        raise HTTPException(status_code=403, detail="telemetry access denied")
+
     last = getattr(request.app.state, "telemetry_last", None)
     by_device = getattr(request.app.state, "telemetry_by_device", None)
     devices = by_device if isinstance(by_device, dict) else {}

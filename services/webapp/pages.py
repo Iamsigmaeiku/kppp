@@ -17,6 +17,8 @@ from services.decoder_ingest.dashboard import get_session_manager
 from .avatars import avatar_url_for
 from .deps import get_current_user, get_db
 from .models import AiCoachReport, CarBinding, RaceSession, User, public_display_name
+from .telemetry_access import can_view_telemetry
+from .template_ctx import template_globals
 
 router = APIRouter()
 
@@ -34,7 +36,9 @@ async def dashboard_page(
         return RedirectResponse(url="/login?next=/", status_code=302)
     # 外部入口曾把公開網址做成 /dashboards，容易跟 Grafana 預設路由撞名；
     # 這幾個別名都導回同一個即時面板。
-    return request.app.state.templates.TemplateResponse(request, "dashboard.html", {})
+    return request.app.state.templates.TemplateResponse(
+        request, "dashboard.html", template_globals(user)
+    )
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -57,27 +61,36 @@ async def login_page(request: Request, user: User | None = Depends(get_current_u
     return request.app.state.templates.TemplateResponse(
         request,
         "login.html",
-        {
-            "google_enabled": web_config.google is not None,
-            "dev_bypass": web_config.auth_dev_bypass,
-            "next": nxt,
-            "error_message": error_message,
-        },
+        template_globals(
+            user,
+            google_enabled=web_config.google is not None,
+            dev_bypass=web_config.auth_dev_bypass,
+            next=nxt,
+            error_message=error_message,
+        ),
     )
 
 
 @router.get("/telemetry", response_class=HTMLResponse)
 @router.get("/telemetry/", response_class=HTMLResponse)
-async def telemetry_page(request: Request):
+async def telemetry_page(
+    request: Request, user: User | None = Depends(get_current_user)
+):
+    if user is None:
+        return RedirectResponse(url="/login?next=/telemetry", status_code=302)
+    if not can_view_telemetry(user):
+        return RedirectResponse(url="/", status_code=302)
+
     web_config = request.app.state.web_config
     last = getattr(request.app.state, "telemetry_last", None)
     return request.app.state.templates.TemplateResponse(
         request,
         "telemetry.html",
-        {
-            "grafana_embed_url": web_config.grafana_embed_url,
-            "telemetry_last": last,
-        },
+        template_globals(
+            user,
+            grafana_embed_url=web_config.grafana_embed_url,
+            telemetry_last=last,
+        ),
     )
 
 
@@ -150,15 +163,15 @@ async def profile_page(
     return request.app.state.templates.TemplateResponse(
         request,
         "profile.html",
-        {
-            "user": user,
-            "display_name": public_display_name(user),
-            "avatar_url": avatar_url_for(user),
-            "current_session_id": current_session_id,
-            "current_race_session": current_race_session,
-            "current_bindings": current_bindings,
-            "history_bindings": history_bindings,
-            "reports_by_key": reports_by_key,
-            "needs_bind": bool(current_session_id) and not current_bindings,
-        },
+        template_globals(
+            user,
+            display_name=public_display_name(user),
+            avatar_url=avatar_url_for(user),
+            current_session_id=current_session_id,
+            current_race_session=current_race_session,
+            current_bindings=current_bindings,
+            history_bindings=history_bindings,
+            reports_by_key=reports_by_key,
+            needs_bind=bool(current_session_id) and not current_bindings,
+        ),
     )

@@ -2,12 +2,44 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 
 app = FastAPI(title="TKS Dashboard")
 connected_clients: set[WebSocket] = set()
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/version")
+async def version():
+    commit = os.getenv("KPP_COMMIT", "").strip()
+    if not commit:
+        try:
+            commit = (
+                subprocess.check_output(
+                    [
+                        "git",
+                        "-C",
+                        os.path.dirname(__file__),
+                        "rev-parse",
+                        "--short",
+                        "HEAD",
+                    ],
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+        except Exception:
+            commit = "unknown"
+    return {"commit": commit}
 
 _lap_tracker = None
 _on_reset = None

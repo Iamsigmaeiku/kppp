@@ -1,0 +1,14 @@
+{
+  "torch": "2.8.0",
+  "cuda": true,
+  "gpu": "Orin",
+  "device": "cuda",
+  "checkpoint": "/home/evan/smartkart-lstm/checkpoints/latest.pt",
+  "n": 200,
+  "warmup": 20,
+  "mean_ms": 0.8155118947615847,
+  "p50_ms": 0.7752699893899262,
+  "p95_ms": 1.0890240082517266,
+  "min_ms": 0.7273809751495719,
+  "max_ms": 1.1843859683722258
+}

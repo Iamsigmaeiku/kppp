@@ -1,0 +1,10 @@
+# SmartKart LSTM/GRU pipeline deps (PyTorch installed separately — especially on Jetson)
+influxdb-client>=1.40
+python-dotenv>=1.0
+numpy>=1.24
+pandas>=2.0
+PyYAML>=6.0
+matplotlib>=3.7
+
+# Optional for local x86 training (NOT for Jetson — use NVIDIA wheel there):
+# torch  — install manually, see README

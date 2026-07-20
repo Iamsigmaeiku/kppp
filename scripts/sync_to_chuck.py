@@ -65,7 +65,7 @@ def pack_buf() -> bytes:
 ENV_SNIPPET = """
 # --- telemetry / grafana (managed) ---
 TELEMETRY_INGEST_TOKEN=kpp-telemetry-ingest-token-change-me
-GRAFANA_EMBED_URL=/grafana/d/kart-telemetry/karting?orgId=1&kiosk=tv&theme=dark&refresh=2s
+GRAFANA_EMBED_URL=/grafana/d/kart-telemetry/kart-telemetry-f1?orgId=1&kiosk=tv&theme=dark&refresh=2s
 GRAFANA_UPSTREAM=http://127.0.0.1:3000
 INFLUX_URL=http://127.0.0.1:8086
 INFLUX_TOKEN=kpp-dev-influx-token-change-me
@@ -99,7 +99,7 @@ def main():
         (
             "GRAFANA_EMBED_URL",
             # kiosk=tv: Grafana 11 TV mode — hide sidebar + top nav in iframe
-            "/grafana/d/kart-telemetry/karting?orgId=1&kiosk=tv&theme=dark&refresh=2s",
+            "/grafana/d/kart-telemetry/kart-telemetry-f1?orgId=1&kiosk=tv&theme=dark&refresh=2s",
         ),
         ("GRAFANA_UPSTREAM", "http://127.0.0.1:3000"),
         ("INFLUX_URL", "http://127.0.0.1:8086"),
@@ -123,7 +123,7 @@ def main():
         "> /tmp/kpp-dashboard.log 2>&1 & echo started; sleep 3; "
         "curl -s -o /dev/null -w 'telemetry:%{http_code}\\n' http://127.0.0.1:5000/telemetry; "
         "curl -s -o /dev/null -w 'grafana:%{http_code}\\n' "
-        "'http://127.0.0.1:5000/grafana/d/kart-telemetry/karting?orgId=1&kiosk&theme=dark'; "
+        "'http://127.0.0.1:5000/grafana/d/kart-telemetry/kart-telemetry-f1?orgId=1&kiosk&theme=dark'; "
         "curl -s -o /dev/null -w 'ingest_opt:%{http_code}\\n' -X OPTIONS http://127.0.0.1:5000/api/telemetry/ingest; "
         "tail -40 /tmp/kpp-dashboard.log",
         check=False,

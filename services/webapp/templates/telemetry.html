@@ -37,7 +37,7 @@
   .telemetry-frame-wrap {
     position: relative;
     width: 100%;
-    height: calc(100vh - 220px);
+    height: calc(100vh - 260px);
     min-height: 640px;
     border-radius: var(--radius);
     overflow: hidden;
@@ -57,11 +57,11 @@
 {% endblock %}
 
 {% block content %}
-<div class="panel" style="padding:1rem 1.1rem 1.15rem;">
-  <div class="panel-header" style="margin-bottom:0.75rem;">卡丁車遙測（IMU / DHT / GPS / 霍爾）</div>
-  <div class="telemetry-status" id="telemetryStatus"
-       x-data="telemetryStatus()"
-       x-init="poll()">
+<div class="panel" style="padding:1rem 1.1rem 1.15rem;"
+     x-data="telemetryStatus()"
+     x-init="poll()">
+  <div class="panel-header" style="margin-bottom:0.75rem;">卡丁車遙測（IMU / GPS / 雙 IMU）</div>
+  <div class="telemetry-status" id="telemetryStatus">
     <span>
       <span class="dot" :class="online ? 'ok' : 'warn'"></span>
       <span x-text="online ? 'ESP32 有資料流入' : '等待 ESP32 資料…'"></span>
@@ -73,14 +73,13 @@
           <code x-text="dev.device_id"></code>
           · <span x-text="dev.received_at || '—'"></span>
         </span>
-        <span x-show="dev.sample?.accel_mag != null || dev.sample?.dht_temp_c != null" x-cloak>
+        <span x-show="dev.sample?.accel_mag != null || dev.sample?.accel_dyn != null" x-cloak>
           |a|=<span x-text="fmt(dev.sample?.accel_mag)"></span>g
-          · DHT <span x-text="fmt(dev.sample?.dht_temp_c)"></span>°C /
-          <span x-text="fmt(dev.sample?.dht_humidity)"></span>%RH
+          · dyn=<span x-text="fmt(dev.sample?.accel_dyn)"></span>g
         </span>
-        <span x-show="dev.sample?.hall_adc != null || dev.sample?.hall_hz != null" x-cloak>
-          霍爾 ADC <span x-text="fmt(dev.sample?.hall_adc, 0)"></span>
-          · <span x-text="fmt(dev.sample?.hall_hz)"></span> Hz
+        <span x-show="dev.sample?.gy85_heading_deg != null || dev.sample?.mpu_temp_c != null" x-cloak>
+          GY85 hd=<span x-text="fmt(dev.sample?.gy85_heading_deg, 0)"></span>°
+          · MPU T=<span x-text="fmt(dev.sample?.mpu_temp_c)"></span>°C
         </span>
         <span>
           <span class="dot" :class="hasGpsFix(dev) ? 'ok' : 'warn'"></span>
@@ -99,10 +98,11 @@
       </div>
     </template>
   </div>
+
   <div class="telemetry-frame-wrap">
     {% if grafana_embed_url %}
     <iframe
-      title="Grafana 遙測儀表板"
+      title="Kart Telemetry Grafana"
       src="{{ grafana_embed_url }}"
       referrerpolicy="no-referrer-when-downgrade"
       allowfullscreen
@@ -112,8 +112,8 @@
     {% endif %}
   </div>
   <p style="margin:0.85rem 0 0; color:var(--text-faint); font-size:0.8rem;">
-    儀表板由 Grafana + InfluxDB 提供；請先 <code>docker compose up -d</code>，
-    並讓 ESP32 POST 到 <code>/api/telemetry/ingest</code>。
+    看板內用 <strong>車輛</strong> 下拉選 #1（<code>esp32-kart-01</code> IMU/GPS）或 #2（<code>esp32-kart-02</code> GY-85/MPU/GPS）；
+    Fleet 區塊為雙車疊圖。Grafana uid：<code>kart-telemetry</code>。
   </p>
 </div>
 <script>
@@ -152,8 +152,7 @@ function telemetryStatus() {
           const d = await r.json();
           this.last = d.last;
           this.devices = d.devices || {};
-          const anyFresh = this.deviceList.some((dev) => this.isFresh(dev));
-          this.online = anyFresh;
+          this.online = this.deviceList.some((dev) => this.isFresh(dev));
         } catch (_) { /* ignore */ }
       };
       await tick();

@@ -11,7 +11,6 @@
   <button id="archiveBtn" class="btn btn-primary archive-btn" type="button" style="display:none;" disabled>
     歸檔本節
   </button>
-  <div id="unregisteredBadge"><span>⚠</span><span class="label">0 未配對</span></div>
   <div id="status"><span class="dot"></span><span class="label">連線中…</span></div>
 </div>
 
@@ -48,27 +47,6 @@
   </div>
 </div>
 
-<details id="unregisteredPanel" class="panel" open>
-  <summary>⚠ 未配對UID<span id="unregisteredMeta">0 台</span></summary>
-  <table class="unreg-table" id="unregisteredTable" style="display:none;">
-    <thead>
-      <tr>
-        <th>UID</th>
-        <th>圈數</th>
-        <th>最佳單圈</th>
-        <th>最後出現</th>
-      </tr>
-    </thead>
-    <tbody id="unregisteredRows"></tbody>
-  </table>
-  <div id="unregisteredEmpty">目前沒有未配對的UID。有新的車手/車號時，若CAR_NUMBER_MAP還沒登記，會出現在這裡，方便直接複製UID去補設定。</div>
-</details>
-
-<details id="capturesPanel" class="panel">
-  <summary>即時封包 <span id="captureMeta">0 筆 · —</span></summary>
-  <ul id="captures"></ul>
-</details>
-
 <script>
   const rows = document.getElementById("rows");
   const statusEl = document.getElementById("status");
@@ -80,17 +58,8 @@
   const archiveBannerTitle = document.getElementById("archiveBannerTitle");
   const archiveBannerDetail = document.getElementById("archiveBannerDetail");
   const archiveSessionLink = document.getElementById("archiveSessionLink");
-  const capturesEl = document.getElementById("captures");
-  const captureMetaEl = document.getElementById("captureMeta");
-  const unregisteredBadge = document.getElementById("unregisteredBadge");
-  const unregisteredTable = document.getElementById("unregisteredTable");
-  const unregisteredRows = document.getElementById("unregisteredRows");
-  const unregisteredEmpty = document.getElementById("unregisteredEmpty");
-  const unregisteredMetaEl = document.getElementById("unregisteredMeta");
   const state = new Map();
-  const MAX_CAPTURES = 30;
   let decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
-  let captureCount = 0;
   // 目前的 session_id：由伺服器在連線時、以及每次開新場次時廣播
   // （見 dashboard.py 的 session_info 訊息），用來查詢「每一圈的圈時」
   // 展開明細（GET /api/sessions/{session_id}/laps/{transponder_id}）。
@@ -198,61 +167,6 @@
     archiveBanner.style.display = "none";
   });
 
-  function fmtLastSeen(iso) {
-    if (!iso) return "—";
-    try {
-      return new Date(iso).toLocaleTimeString();
-    } catch {
-      return "—";
-    }
-  }
-
-  // 未配對 transponder 面板：從 state 篩出 registered === false 的項目，
-  // 依最後出現時間新到舊排序，方便現場對照剛跑過的車。
-  function renderUnregistered() {
-    const unregistered = [...state.values()]
-      .filter((s) => s.registered === false)
-      .sort((a, b) => {
-        const ta = a.last_passing_at ? new Date(a.last_passing_at).getTime() : 0;
-        const tb = b.last_passing_at ? new Date(b.last_passing_at).getTime() : 0;
-        return tb - ta;
-      });
-
-    const count = unregistered.length;
-    unregisteredMetaEl.textContent = `${count} 台`;
-    unregisteredBadge.querySelector(".label").textContent = `${count} 未配對`;
-    unregisteredBadge.classList.toggle("show", count > 0);
-
-    unregisteredTable.style.display = count > 0 ? "" : "none";
-    unregisteredEmpty.style.display = count > 0 ? "none" : "";
-
-    unregisteredRows.innerHTML = "";
-    for (const s of unregistered) {
-      const tr = document.createElement("tr");
-      const tid = s.transponder_id || "—";
-      tr.innerHTML = `
-        <td class="tid-cell">${tid}<button class="copy-btn" type="button" data-tid="${tid}">複製</button></td>
-        <td>${s.lap_count ?? 0}</td>
-        <td>${fmt(s.best_lap_time)}</td>
-        <td>${fmtLastSeen(s.last_passing_at)}</td>`;
-      unregisteredRows.appendChild(tr);
-    }
-  }
-
-  unregisteredRows.addEventListener("click", (ev) => {
-    const btn = ev.target.closest(".copy-btn");
-    if (!btn) return;
-    const tid = btn.dataset.tid;
-    navigator.clipboard?.writeText(tid).then(() => {
-      btn.textContent = "已複製";
-      btn.classList.add("copied");
-      setTimeout(() => {
-        btn.textContent = "複製";
-        btn.classList.remove("copied");
-      }, 1500);
-    }).catch(() => {});
-  });
-
   function fmt(sec) {
     if (sec == null || Number.isNaN(sec)) return "—";
     return sec.toFixed(3) + "s";
@@ -272,17 +186,11 @@
 
   function updateStatus() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const multi = decoderStatus.total_count > 1;
     if (decoderStatus.connected) {
-      statusLabel.textContent = multi
-        ? `已連線 · Decoder ${decoderStatus.connected_count}/${decoderStatus.total_count} 運行中`
-        : "已連線 · Decoder 運行中";
-      statusEl.className =
-        multi && decoderStatus.connected_count < decoderStatus.total_count ? "warn" : "ok";
+      statusLabel.textContent = "已連線";
+      statusEl.className = "ok";
     } else {
-      statusLabel.textContent = multi
-        ? "已連線 · 全部 Decoder 斷線（計時已暫停）"
-        : "已連線 · Decoder 斷線（計時已暫停）";
+      statusLabel.textContent = "已連線 · 計時暫停";
       statusEl.className = "warn";
     }
   }
@@ -371,7 +279,6 @@
       if (detail) rows.appendChild(detail);
     });
 
-    renderUnregistered();
     updateArchiveButton();
   }
 
@@ -476,22 +383,6 @@
   }
   setInterval(tickTimers, 50);
 
-  function pushCapture(data) {
-    captureCount++;
-    const li = document.createElement("li");
-    const ts = document.createElement("span");
-    ts.className = "ts";
-    const time = new Date(data.timestamp).toLocaleTimeString();
-    ts.textContent = time;
-    li.appendChild(ts);
-    li.appendChild(document.createTextNode(data.ascii || data.hex || ""));
-    capturesEl.prepend(li);
-    while (capturesEl.children.length > MAX_CAPTURES) {
-      capturesEl.removeChild(capturesEl.lastChild);
-    }
-    captureMetaEl.textContent = `${captureCount} 筆 · 最新 ${time}`;
-  }
-
   // ---- WebSocket：自動重連（指數退避 1s -> 2s -> 4s -> 上限 10s）----
   let ws = null;
   let reconnectAttempts = 0;
@@ -525,8 +416,8 @@
       currentSessionDate = null;
       updateSessionBadge();
       decoderStatus = { connected: false, connected_count: 0, total_count: 0, decoders: {} };
-      statusLabel.textContent = "已連線 · 同步中…";
-      statusEl.className = "warn";
+      statusLabel.textContent = "已連線";
+      statusEl.className = "ok";
       updateStatus();
       refreshSessionMeta();
     };
@@ -542,7 +433,6 @@
     ws.onmessage = (ev) => {
       const data = JSON.parse(ev.data);
       if (data.type === "capture") {
-        pushCapture(data);
         return;
       }
       if (data.type === "decoder_status") {

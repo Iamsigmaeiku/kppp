@@ -219,7 +219,8 @@ def _smoke_check(c) -> None:
     print("\n[deploy] === Smoke check ===")
     run(
         c,
-        "curl -s -o /dev/null -w 'dashboard_login:%{http_code}\\n' http://127.0.0.1:5000/login; "
+        "curl -s -o /dev/null -w 'health:%{http_code}\\n' http://127.0.0.1:8000/health; "
+        "curl -s -o /dev/null -w 'dashboard_login:%{http_code}\\n' http://127.0.0.1:8000/login; "
         "curl -s -o /dev/null -w 'grafana_health:%{http_code}\\n' 'http://127.0.0.1:3000/grafana/api/health'; "
         "systemctl --user is-active kpp-dashboard.service || echo 'dashboard: NOT active'",
         check=False,

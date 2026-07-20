@@ -1,25 +1,20 @@
 /**
- * ESP32-WROOM-32 → HTTP ingest
+ * ESP32-WROOM-32 → HTTP ingest（esp32dev）
  *
- * Profiles:
- *   (default)         ICM-42688-P + DHT11 + NEO-6M GPS
- *   PROFILE_GPS_HALL  霍爾(GPIO36/ADC1_0) + NEO-6M GPS（第二顆 esp32-kart-02）
+ *   ICM-42688-P (SPI) + DHT11 + M10-180C GPS + 2D ESKF
  *
  * Pins:
- *   ICM42688: 3V3, GND, SDA=GPIO21, SCL=GPIO22
- *   DHT11:    VCC, GND, DATA=GPIO15
- *   Hall:     Vcc=3V3, GND, S=GPIO36 (ADC1_CH0)
- *   NEO-6M:   VCC(3V3/5V), GND, TXD→GPIO16(UART1 RX), RXD→GPIO17(UART1 TX)
- *             不要接 GPIO1/3 — USB 燒錄腳
+ *   ICM42688 SPI: 3V3, GND, SCK=18, MISO=19, MOSI=23, CS=5 (AD0→GND)
+ *   DHT11:        VCC, GND, DATA=GPIO15
+ *   M10-180C:     VCC(3V3/5V), GND, TXD→GPIO16(UART1 RX), RXD→GPIO17(UART1 TX)
+ *                 走 UART1（16/17）；不要接 GPIO1/3 — 那是 esp32-dual-gps 的 UART0
  *
  * Offline: RAM ring；NTP 非阻塞；採樣在 core1，HTTP 在 loop（core0）。
+ * 第二顆板（GY-85+MPU+NEO）見 main_imu2.cpp / env esp32-imu2-gps。
  */
 
 #include <Arduino.h>
-#ifndef PROFILE_GPS_HALL
-#include <Wire.h>
 #include <DHT.h>
-#endif
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -30,16 +25,15 @@
 #include <sys/time.h>
 #include <time.h>
 #include <secrets.h>
-#ifndef PROFILE_GPS_HALL
-#include "DeadReckoner.h"
+#include "Icm42688Spi.h"
+#include "GpsImuEskf.h"
+
+#ifndef INGEST_URL_FALLBACK
+#define INGEST_URL_FALLBACK ""
 #endif
 
 // HTTPS + 大 JSON 在 loop 預設 8KB stack 會爆 canary；拉高再跑 postBatch
-#ifdef PROFILE_GPS_HALL
-SET_LOOP_TASK_STACK_SIZE(12 * 1024);  // GPS+Hall JSON 較小，留 DRAM 給 WiFi
-#else
 SET_LOOP_TASK_STACK_SIZE(24 * 1024);
-#endif
 
 #ifndef WIFI_SSID2
 #define WIFI_SSID2 WIFI_SSID
@@ -47,82 +41,48 @@ SET_LOOP_TASK_STACK_SIZE(24 * 1024);
 #endif
 
 // ---- Pins ----
-#ifndef PROFILE_GPS_HALL
-static constexpr int PIN_SDA = 21;
-static constexpr int PIN_SCL = 22;
-static constexpr int PIN_DHT = 15;
+// GPIO15 是 strapping pin；若 DHT 一直 nan，可在 secrets.h 加 #define PIN_DHT 4 並改接線
+#ifndef PIN_DHT
+#define PIN_DHT 15
 #endif
-static constexpr int PIN_HALL = 36;  // ADC1_CH0 / VP
-static constexpr int PIN_GPS_RX = 16;  // ESP32 RX ← NEO-6M TXD
-static constexpr int PIN_GPS_TX = 17;  // ESP32 TX → NEO-6M RXD
+static constexpr int PIN_GPS_RX = 16;  // ESP32 RX ← GPS TXD（esp32dev: M10-180C）
+static constexpr int PIN_GPS_TX = 17;  // ESP32 TX → GPS RXD
 static constexpr uint32_t GPS_BAUD = 9600;
-static constexpr uint32_t GPS_FIX_STALE_MS = 5000;
+// 新鮮 fix（狀態列「已定位」）：<2s；地圖/ingest 持續上報 hold：<20s（短暫樹蔭丟星仍畫軌）
+static constexpr uint32_t GPS_FIX_FRESH_MS = 2000;
+static constexpr uint32_t GPS_FIX_HOLD_MS = 20000;
 
-// 數位霍爾：ADC 滯回（未知模組先當開關型；raw 一併上報）
-static constexpr int HALL_ADC_HIGH = 2500;
-static constexpr int HALL_ADC_LOW = 1500;
-static constexpr uint32_t HALL_HZ_WINDOW_MS = 1000;
-static constexpr size_t HALL_PULSE_CAP = 64;
-
-#ifndef PROFILE_GPS_HALL
-// ---- ICM-42688-P (Bank 0) ----
-static constexpr uint8_t ICM_ADDR_LOW = 0x68;
-static constexpr uint8_t ICM_ADDR_HIGH = 0x69;
-static constexpr uint8_t ICM_WHO_AM_I_REG = 0x75;
-static constexpr uint8_t ICM_WHO_AM_I_VAL = 0x47;
-static constexpr uint8_t ICM_PWR_MGMT0 = 0x4E;
-static constexpr uint8_t ICM_GYRO_CONFIG0 = 0x4F;
-static constexpr uint8_t ICM_ACCEL_CONFIG0 = 0x50;
-static constexpr uint8_t ICM_TEMP_DATA1 = 0x1D;
-
-static constexpr float ACCEL_SENS = 2048.0f;
-static constexpr float GYRO_SENS = 16.4f;
-#endif
-
-static constexpr uint32_t IMU_PERIOD_MS = 40;  // 25 Hz
-static constexpr uint32_t POST_PERIOD_MS = 400;
-static constexpr uint32_t POST_BURST_MS = 80;
-#ifndef PROFILE_GPS_HALL
+static constexpr uint32_t IMU_PERIOD_MS = 20;  // 50 Hz（抓彎道尖峰）
+static constexpr uint32_t POST_PERIOD_MS = 200;
+static constexpr uint32_t POST_BURST_MS = 20;
 static constexpr uint32_t DHT_PERIOD_MS = 2000;
-#endif
 static constexpr uint32_t NTP_RESYNC_MS = 3600000;
 static constexpr uint32_t NTP_RETRY_MS = 15000;
-static constexpr size_t POST_CHUNK = 10;
-#ifdef PROFILE_GPS_HALL
-static constexpr size_t RING_CAP = 150;  // ~6s @25Hz；省 DRAM 給 WiFi/TLS
-#else
-static constexpr size_t RING_CAP = 900;  // ~36s @25Hz
-#endif
+static constexpr size_t POST_CHUNK = 25;  // LAN 大口；放 stack 不佔 BSS
+static constexpr size_t RING_CAP = 600;  // ~24s @25Hz（省 BSS；靠 LAN 抽乾）
+static constexpr uint32_t INGEST_PRIMARY_RETRY_MS = 300000;
 
-#ifndef PROFILE_GPS_HALL
 static DHT dht(PIN_DHT, DHT11);
-static uint8_t icmAddr = ICM_ADDR_LOW;
-static DeadReckoner deadReckoner;
-#endif
+static Icm42688Spi icm;
+static GpsImuEskf eskf;
 
 static HardwareSerial gpsSerial(1);
 static TinyGPSPlus gps;
 
 struct Sample {
-#ifdef PROFILE_GPS_HALL
-  float gps_lat, gps_lon, gps_speed_mps, gps_course_deg, gps_alt_m, gps_hdop;
-  uint32_t gps_satellites;
-  bool has_gps;
-  int hall_adc;
-  float hall_hz;
-  bool has_hall;
-  uint32_t millis_at;
-#else
   float ax, ay, az, gx, gy, gz, imu_temp_c, accel_mag;
+  float accel_dyn;  // |a - g_lp|：去重力後動態加速度（彎道/煞車看得見）
+  float a_lon, a_lat;  // 水平面動態（本板重力在 +Y → lon≈X, lat≈Z）
   float dht_temp_c, dht_humidity;
   bool has_dht;
+  bool has_imu;  // false：不要送 ax=0 假零
   float gps_lat, gps_lon, gps_speed_mps, gps_course_deg, gps_alt_m, gps_hdop;
   uint32_t gps_satellites;
   bool has_gps;
+  bool gps_fresh;  // age < GPS_FIX_FRESH_MS
   float lat_dr, lon_dr, heading_dr_deg, speed_dr_mps;
   bool has_dr;
   uint32_t millis_at;
-#endif
 };
 
 struct GpsFix {
@@ -137,48 +97,6 @@ static portMUX_TYPE gpsMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t gpsSentenceCount = 0;
 static char gpsLastSentence[128];
 static portMUX_TYPE gpsSentMux = portMUX_INITIALIZER_UNLOCKED;
-
-static volatile int lastHallAdc = 0;
-static volatile float lastHallHz = 0.0f;
-static bool hallWasHigh = false;
-static uint32_t hallPulseMs[HALL_PULSE_CAP];
-static size_t hallPulseHead = 0;
-static size_t hallPulseCount = 0;
-static portMUX_TYPE hallMux = portMUX_INITIALIZER_UNLOCKED;
-
-static void hallUpdate() {
-  const int adc = analogRead(PIN_HALL);
-  const uint32_t now = millis();
-
-  portENTER_CRITICAL(&hallMux);
-  lastHallAdc = adc;
-
-  if (!hallWasHigh && adc >= HALL_ADC_HIGH) {
-    hallWasHigh = true;
-    hallPulseMs[hallPulseHead] = now;
-    hallPulseHead = (hallPulseHead + 1) % HALL_PULSE_CAP;
-    if (hallPulseCount < HALL_PULSE_CAP) hallPulseCount++;
-  } else if (hallWasHigh && adc <= HALL_ADC_LOW) {
-    hallWasHigh = false;
-  }
-
-  // 滑窗：過去 HALL_HZ_WINDOW_MS 內脈衝數 → Hz
-  size_t n = 0;
-  for (size_t i = 0; i < hallPulseCount; i++) {
-    const size_t idx =
-        (hallPulseHead + HALL_PULSE_CAP - hallPulseCount + i) % HALL_PULSE_CAP;
-    if (now - hallPulseMs[idx] <= HALL_HZ_WINDOW_MS) n++;
-  }
-  lastHallHz = (float)n * (1000.0f / (float)HALL_HZ_WINDOW_MS);
-  portEXIT_CRITICAL(&hallMux);
-}
-
-static void hallSnapshot(int &adc, float &hz) {
-  portENTER_CRITICAL(&hallMux);
-  adc = lastHallAdc;
-  hz = lastHallHz;
-  portEXIT_CRITICAL(&hallMux);
-}
 
 static void gpsPoll() {
   static char lineBuf[128];
@@ -198,7 +116,7 @@ static void gpsPoll() {
         portEXIT_CRITICAL(&gpsSentMux);
       }
       lineLen = 0;
-      if (gps.location.isValid() && gps.location.age() < GPS_FIX_STALE_MS) {
+      if (gps.location.isValid() && gps.location.age() < GPS_FIX_HOLD_MS) {
         portENTER_CRITICAL(&gpsMux);
         gpsFix.lat = (float)gps.location.lat();
         gpsFix.lon = (float)gps.location.lng();
@@ -216,16 +134,151 @@ static void gpsPoll() {
   }
 }
 
-static const uint8_t UBX_CFG_RATE_5HZ[] = {
-    0xB5, 0x62, 0x06, 0x08, 0x06, 0x00,
-    0xC8, 0x00, 0x01, 0x00, 0x01, 0x00,
-    0xDE, 0x6A,
-};
+static constexpr uint32_t GPS_BAUD_FAST = 38400;
 
-static void gpsSetRate5Hz() {
-  gpsSerial.write(UBX_CFG_RATE_5HZ, sizeof(UBX_CFG_RATE_5HZ));
+// M10-180C (u-blox M10, protver 34.x): use UBX-CFG-VALSET, not legacy
+// CFG-RATE / CFG-NAV5 / CFG-PRT / CFG-MSG. Interface Description §1.3 strongly
+// prefers the Configuration interface; §4.10 maps some legacy fields but notes
+// incomplete / non-1:1 availability. UBX-CFG-MSG is absent from §4.10 — message
+// rates must use CFG-MSGOUT-NMEA_ID_*_UART1 keys.
+// Ref: u-blox-M10-SPG-5.10 Interface Description UBX-21035062.
+
+static constexpr uint8_t UBX_LAYER_RAM_BBR = 0x03;  // bit0 RAM | bit1 BBR
+
+static void ubxFletcher(const uint8_t *payload, size_t len, uint8_t &ckA,
+                        uint8_t &ckB) {
+  ckA = 0;
+  ckB = 0;
+  for (size_t i = 0; i < len; i++) {
+    ckA = (uint8_t)(ckA + payload[i]);
+    ckB = (uint8_t)(ckB + ckA);
+  }
+}
+
+// Key size from bits [30:28] of key ID (u-blox Configuration interface).
+static size_t ubxCfgValueSize(uint32_t keyId) {
+  switch ((keyId >> 28) & 0x07u) {
+    case 1:
+      return 1;  // one bit / L stored as U1
+    case 2:
+      return 1;  // U1 / E1 / X1
+    case 3:
+      return 2;  // U2 / E2 / X2
+    case 4:
+      return 4;  // U4 / E4 / X4 / R4
+    case 5:
+      return 8;  // U8 / R8 / X8
+    default:
+      return 1;
+  }
+}
+
+static void ubxSendValSet(uint8_t layers, const uint32_t *keys,
+                          const uint32_t *vals, size_t n) {
+  // Header(4) + version/layers/reserved(4) + up to n*(4+8) + CK(2)
+  uint8_t pkt[8 + 12 * 12 + 2];
+  size_t off = 0;
+  pkt[off++] = 0xB5;
+  pkt[off++] = 0x62;
+  pkt[off++] = 0x06;
+  pkt[off++] = 0x8A;  // UBX-CFG-VALSET
+  const size_t lenPos = off;
+  pkt[off++] = 0;  // length lo (fill later)
+  pkt[off++] = 0;  // length hi
+  pkt[off++] = 0x00;  // version 0 (transactionless)
+  pkt[off++] = layers;
+  pkt[off++] = 0x00;
+  pkt[off++] = 0x00;
+  for (size_t i = 0; i < n; i++) {
+    const uint32_t key = keys[i];
+    const size_t vsz = ubxCfgValueSize(key);
+    pkt[off++] = (uint8_t)(key & 0xFF);
+    pkt[off++] = (uint8_t)((key >> 8) & 0xFF);
+    pkt[off++] = (uint8_t)((key >> 16) & 0xFF);
+    pkt[off++] = (uint8_t)((key >> 24) & 0xFF);
+    const uint32_t v = vals[i];
+    for (size_t b = 0; b < vsz; b++) {
+      pkt[off++] = (uint8_t)((v >> (8 * b)) & 0xFF);
+    }
+  }
+  const uint16_t payloadLen = (uint16_t)(off - 6);
+  pkt[lenPos] = (uint8_t)(payloadLen & 0xFF);
+  pkt[lenPos + 1] = (uint8_t)((payloadLen >> 8) & 0xFF);
+  uint8_t ckA = 0, ckB = 0;
+  ubxFletcher(pkt + 2, off - 2, ckA, ckB);
+  pkt[off++] = ckA;
+  pkt[off++] = ckB;
+  gpsSerial.write(pkt, off);
   gpsSerial.flush();
-  Serial.println("[gps] sent UBX-CFG-RATE 5Hz");
+}
+
+static void gpsSendConfigSuite() {
+  // Rate + dynModel + NMEA filter (no baud — that is sent separately before
+  // ESP switches UART speed).
+  static const uint32_t kKeys[] = {
+      0x30210001u,  // CFG-RATE-MEAS (U2, 0.001 s)
+      0x30210002u,  // CFG-RATE-NAV (U2)
+      0x20110021u,  // CFG-NAVSPG-DYNMODEL (E1) AUTOMOTIVE=4
+      0x209100bbu,  // CFG-MSGOUT-NMEA_ID_GGA_UART1
+      0x209100acu,  // CFG-MSGOUT-NMEA_ID_RMC_UART1
+      0x209100cau,  // CFG-MSGOUT-NMEA_ID_GLL_UART1
+      0x209100c0u,  // CFG-MSGOUT-NMEA_ID_GSA_UART1
+      0x209100c5u,  // CFG-MSGOUT-NMEA_ID_GSV_UART1
+      0x209100b1u,  // CFG-MSGOUT-NMEA_ID_VTG_UART1
+  };
+  static const uint32_t kVals[] = {
+      200u,  // 200 ms → 5 Hz
+      1u,    // one nav per measurement
+      4u,    // Automotive
+      1u,    // GGA on
+      1u,    // RMC on
+      0u,    // GLL off
+      0u,    // GSA off
+      0u,    // GSV off
+      0u,    // VTG off
+  };
+  ubxSendValSet(UBX_LAYER_RAM_BBR, kKeys, kVals,
+                sizeof(kKeys) / sizeof(kKeys[0]));
+  delay(40);
+}
+
+static void gpsSendBaudFast() {
+  static const uint32_t kKeys[] = {0x40520001u};  // CFG-UART1-BAUDRATE (U4)
+  static const uint32_t kVals[] = {GPS_BAUD_FAST};
+  ubxSendValSet(UBX_LAYER_RAM_BBR, kKeys, kVals, 1);
+}
+
+static void gpsConfigure() {
+  // 先在 9600 送 VALSET，再切 38400；失敗則退回 9600（模組可能預設 9600 或已在 38400）
+  gpsSendConfigSuite();
+  delay(40);
+  gpsSendBaudFast();
+  delay(120);
+  gpsSerial.end();
+  delay(40);
+  gpsSerial.begin(GPS_BAUD_FAST, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+  delay(80);
+  gpsSendConfigSuite();  // 若已在 38400（BBR），第一輪 9600 會打空，這裡補打
+
+  const uint32_t t0 = millis();
+  bool got = false;
+  while (millis() - t0 < 1500) {
+    if (gpsSerial.available()) {
+      got = true;
+      break;
+    }
+    delay(10);
+  }
+  if (!got) {
+    Serial.println("[gps] no UART @38400 → fallback 9600");
+    gpsSerial.end();
+    delay(40);
+    gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
+    delay(80);
+    gpsSendConfigSuite();
+  } else {
+    Serial.println("[gps] M10 VALSET: 5Hz + Automotive + GGA/RMC @38400");
+  }
 }
 
 static bool gpsSnapshot(GpsFix &out) {
@@ -241,7 +294,11 @@ static bool gpsSnapshot(GpsFix &out) {
   out.valid = gpsFix.valid;
   portEXIT_CRITICAL(&gpsMux);
   if (!out.valid) return false;
-  return (millis() - out.updated_at_ms) < GPS_FIX_STALE_MS;
+  return (millis() - out.updated_at_ms) < GPS_FIX_HOLD_MS;
+}
+
+static bool gpsIsFresh(const GpsFix &fix) {
+  return fix.valid && (millis() - fix.updated_at_ms) < GPS_FIX_FRESH_MS;
 }
 
 static Sample ring[RING_CAP];
@@ -250,19 +307,63 @@ static size_t ringCount = 0;
 static uint32_t ringDropped = 0;
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 
-#ifndef PROFILE_GPS_HALL
 static volatile float lastDhtTemp = NAN;
 static volatile float lastDhtHum = NAN;
 static volatile bool dhtOk = false;
+static volatile uint32_t dhtFailStreak = 0;
 static volatile uint32_t imuOkCount = 0;
 static volatile uint32_t imuFailCount = 0;
-#endif
+
+static bool dhtTryRead(bool force) {
+  // 單次回線：先 force read，再用 cache 取 T/H（避免連續兩次 bitbang）
+  if (!dht.read(force)) {
+    dhtFailStreak++;
+    return false;
+  }
+  const float t = dht.readTemperature(false);
+  const float h = dht.readHumidity(false);
+  if (isnan(t) || isnan(h)) {
+    dhtFailStreak++;
+    return false;
+  }
+  lastDhtTemp = t;
+  lastDhtHum = h;
+  dhtOk = true;
+  dhtFailStreak = 0;
+  return true;
+}
 
 static volatile bool timeOk = false;
 static volatile int64_t millisToUnixOffset = 0;
 
 static bool ntpKicked = false;
 static uint32_t ntpKickAt = 0;
+
+// true = 暫時打 FALLBACK；逾時後試回 PRIMARY
+static bool ingestUseFallback = false;
+static uint32_t ingestFallbackSince = 0;
+
+static const char *activeIngestUrl() {
+  if (INGEST_URL_FALLBACK[0] == '\0') return INGEST_URL;
+  if (ingestUseFallback) return INGEST_URL_FALLBACK;
+  return INGEST_URL;
+}
+
+static void ingestPreferFallback(const char *why) {
+  if (INGEST_URL_FALLBACK[0] == '\0') return;
+  if (!ingestUseFallback) {
+    Serial.printf("[http] switch → FALLBACK (%s)\n", why);
+  }
+  ingestUseFallback = true;
+  ingestFallbackSince = millis();
+}
+
+static void ingestMaybeRetryPrimary() {
+  if (!ingestUseFallback || INGEST_URL_FALLBACK[0] == '\0') return;
+  if (millis() - ingestFallbackSince < INGEST_PRIMARY_RETRY_MS) return;
+  Serial.println("[http] retry PRIMARY after fallback hold");
+  ingestUseFallback = false;
+}
 
 static void ringPush(const Sample &s) {
   portENTER_CRITICAL(&ringMux);
@@ -432,6 +533,7 @@ static void pollTime() {
 static void attachGpsToSample(Sample &out) {
   GpsFix fix{};
   out.has_gps = gpsSnapshot(fix);
+  out.gps_fresh = false;
   if (out.has_gps) {
     out.gps_lat = fix.lat;
     out.gps_lon = fix.lon;
@@ -440,132 +542,54 @@ static void attachGpsToSample(Sample &out) {
     out.gps_alt_m = fix.alt_m;
     out.gps_hdop = fix.hdop;
     out.gps_satellites = fix.satellites;
+    out.gps_fresh = gpsIsFresh(fix);
   }
-}
-
-#ifdef PROFILE_GPS_HALL
-static void attachHallToSample(Sample &out) {
-  int adc = 0;
-  float hz = 0;
-  hallSnapshot(adc, hz);
-  out.hall_adc = adc;
-  out.hall_hz = hz;
-  out.has_hall = true;
-}
-
-static void sampleTask(void *) {
-  uint32_t lastSample = 0;
-  uint32_t lastDropLog = 0;
-
-  for (;;) {
-    uint32_t now = millis();
-    gpsPoll();
-    hallUpdate();
-
-    if (now - lastSample >= IMU_PERIOD_MS) {
-      lastSample = now;
-      Sample s{};
-      s.millis_at = now;
-      attachGpsToSample(s);
-      attachHallToSample(s);
-      ringPush(s);
-    }
-
-    if (ringDropped > 0 && now - lastDropLog > 2000) {
-      lastDropLog = now;
-      Serial.printf("[ring] dropped=%lu size=%u\n",
-                    (unsigned long)ringDropped, (unsigned)ringSize());
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(1));
-  }
-}
-#else
-static bool icmWrite(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(icmAddr);
-  Wire.write(reg);
-  Wire.write(val);
-  return Wire.endTransmission() == 0;
-}
-
-static bool icmRead(uint8_t reg, uint8_t *buf, size_t len) {
-  Wire.beginTransmission(icmAddr);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return false;
-  size_t n = Wire.requestFrom(icmAddr, (uint8_t)len);
-  if (n != len) return false;
-  for (size_t i = 0; i < len; i++) buf[i] = Wire.read();
-  return true;
-}
-
-static int16_t be16(const uint8_t *p) {
-  return (int16_t)((p[0] << 8) | p[1]);
-}
-
-static bool icmProbe() {
-  for (uint8_t addr : {ICM_ADDR_LOW, ICM_ADDR_HIGH}) {
-    icmAddr = addr;
-    uint8_t who = 0;
-    if (!icmRead(ICM_WHO_AM_I_REG, &who, 1)) continue;
-    if (who == ICM_WHO_AM_I_VAL) {
-      Serial.printf("[icm] WHO_AM_I=0x%02X @ 0x%02X\n", who, addr);
-      return true;
-    }
-    Serial.printf("[icm] unexpected WHO_AM_I=0x%02X @ 0x%02X\n", who, addr);
-  }
-  return false;
-}
-
-static bool icmWriteRetry(uint8_t reg, uint8_t val, int tries = 5) {
-  for (int i = 0; i < tries; i++) {
-    if (icmWrite(reg, val)) return true;
-    delay(10);
-  }
-  Serial.printf("[icm] write fail reg=0x%02X val=0x%02X\n", reg, val);
-  return false;
 }
 
 static bool icmReadSample(Sample &out);
 
-static bool icmInit() {
-  if (!icmProbe()) return false;
-  if (!icmWriteRetry(ICM_PWR_MGMT0, 0x0F)) return false;
-  delay(45);
-  if (!icmWriteRetry(ICM_GYRO_CONFIG0, 0x08)) return false;
-  if (!icmWriteRetry(ICM_ACCEL_CONFIG0, 0x08)) return false;
-  delay(20);
-
-  Sample probe{};
-  if (!icmReadSample(probe)) {
-    Serial.println("[icm] first read failed");
-    return false;
-  }
-  Serial.printf("[icm] sample ax=%.2f ay=%.2f az=%.2f |a|=%.2f T=%.1f\n",
-                probe.ax, probe.ay, probe.az, probe.accel_mag, probe.imu_temp_c);
-  return true;
-}
+static bool icmInit() { return icm.begin(); }
 
 static bool icmReadSample(Sample &out) {
-  uint8_t raw[14];
-  if (!icmRead(ICM_TEMP_DATA1, raw, 14)) return false;
+  IcmSample raw{};
+  if (!icm.readSample(raw)) {
+    out.has_imu = false;
+    return false;
+  }
 
-  int16_t temp = be16(&raw[0]);
-  int16_t ax = be16(&raw[2]);
-  int16_t ay = be16(&raw[4]);
-  int16_t az = be16(&raw[6]);
-  int16_t gx = be16(&raw[8]);
-  int16_t gy = be16(&raw[10]);
-  int16_t gz = be16(&raw[12]);
+  out.imu_temp_c = raw.imu_temp_c;
+  out.ax = raw.ax;
+  out.ay = raw.ay;
+  out.az = raw.az;
+  out.gx = raw.gx;
+  out.gy = raw.gy;
+  out.gz = raw.gz;
+  out.accel_mag = raw.accel_mag;
 
-  out.imu_temp_c = (temp / 132.48f) + 25.0f;
-  out.ax = ax / ACCEL_SENS;
-  out.ay = ay / ACCEL_SENS;
-  out.az = az / ACCEL_SENS;
-  out.gx = gx / GYRO_SENS;
-  out.gy = gy / GYRO_SENS;
-  out.gz = gz / GYRO_SENS;
-  out.accel_mag = sqrtf(out.ax * out.ax + out.ay * out.ay + out.az * out.az);
+  // 慢速 LPF 估重力，dyn = |a - g| → 彎道/煞車尖峰不會被 1g 蓋掉
+  static float gax = 0, gay = 0, gaz = 0;
+  static bool gWarm = false;
+  constexpr float kGAlpha = 0.02f;  // ~1s 時間常數 @50Hz
+  if (!gWarm) {
+    gax = out.ax;
+    gay = out.ay;
+    gaz = out.az;
+    gWarm = true;
+  } else {
+    gax += kGAlpha * (out.ax - gax);
+    gay += kGAlpha * (out.ay - gay);
+    gaz += kGAlpha * (out.az - gaz);
+  }
+  const float lx = out.ax - gax;
+  const float ly = out.ay - gay;
+  const float lz = out.az - gaz;
+  out.accel_dyn = sqrtf(lx * lx + ly * ly + lz * lz);
+  // 此安裝重力在 +Y（直立≈1g），水平動態 = X/Z，不要拿 ay 當 lateral
+  out.a_lon = lx;
+  out.a_lat = lz;
+
   out.millis_at = millis();
+  out.has_imu = true;
   out.has_dht = dhtOk;
   out.dht_temp_c = lastDhtTemp;
   out.dht_humidity = lastDhtHum;
@@ -596,12 +620,12 @@ static void sampleTask(void *) {
         GpsFix fix{};
         if (gpsSnapshot(fix) && fix.updated_at_ms != lastGpsUpdatedAt) {
           lastGpsUpdatedAt = fix.updated_at_ms;
-          deadReckoner.onGpsFix(fix.updated_at_ms, fix.lat, fix.lon,
-                               fix.speed_mps, fix.course_deg, fix.satellites);
+          eskf.onGpsFix(fix.updated_at_ms, fix.lat, fix.lon, fix.speed_mps,
+                       fix.course_deg, fix.hdop, fix.satellites);
         }
 
-        const DrOutput dr = deadReckoner.tick(s.millis_at, s.ax, s.ay, s.az,
-                                              s.gx, s.gy, s.gz);
+        const EskfOutput dr =
+            eskf.tick(s.millis_at, s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
         s.has_dr = dr.valid;
         if (dr.valid) {
           s.lat_dr = dr.lat_dr;
@@ -610,35 +634,33 @@ static void sampleTask(void *) {
           s.speed_dr_mps = dr.speed_mps;
         }
 
-        if (dr.state == DrState::CALIBRATING) {
+        if (dr.state == EskfState::CALIBRATING) {
           if (now - lastCalibLog > 1000) {
             lastCalibLog = now;
-            Serial.printf("[dr] CALIBRATING %u/%d (keep vehicle still)\n",
-                          (unsigned)dr.bias_samples, DR_GYRO_BIAS_SAMPLES);
+            Serial.printf("[eskf] CALIBRATING %u/%d (keep vehicle still)\n",
+                          (unsigned)dr.bias_samples, ESKF_GYRO_BIAS_SAMPLES);
           }
         } else if (!loggedRunning) {
           loggedRunning = true;
-          Serial.printf("[dr] RUNNING bias_gz=%.4f dps\n",
-                        deadReckoner.gyroBiasDps());
+          Serial.printf("[eskf] RUNNING bias_gz=%.4f dps\n", eskf.gyroBiasDps());
         }
 
         ringPush(s);
       } else {
         imuFailCount++;
         if (imuFailCount == 1 || imuFailCount % 50 == 0) {
-          Serial.printf("[icm] read fail x%lu (addr=0x%02X)\n",
-                        (unsigned long)imuFailCount, icmAddr);
+          Serial.printf("[icm] SPI read fail x%lu\n",
+                        (unsigned long)imuFailCount);
         }
+        // IMU 掛了仍送 DHT/GPS，但不要灌 ax=0 假零
         if (dhtOk && now - lastDhtFallback >= DHT_PERIOD_MS) {
           Sample d{};
+          d.has_imu = false;
           d.has_dht = true;
           d.dht_temp_c = lastDhtTemp;
           d.dht_humidity = lastDhtHum;
           d.millis_at = now;
-          d.ax = d.ay = d.az = 0;
-          d.gx = d.gy = d.gz = 0;
           d.imu_temp_c = NAN;
-          d.accel_mag = 0;
           d.has_dr = false;
           attachGpsToSample(d);
           ringPush(d);
@@ -656,7 +678,6 @@ static void sampleTask(void *) {
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
-#endif
 
 struct WifiCred {
   const char *ssid;
@@ -665,9 +686,9 @@ struct WifiCred {
 
 static const WifiCred WIFI_NETS[] = {
     {WIFI_SSID, WIFI_PASS},
-    {WIFI_SSID2, WIFI_PASS2},
 };
 static constexpr size_t WIFI_NET_COUNT = sizeof(WIFI_NETS) / sizeof(WIFI_NETS[0]);
+
 static size_t wifiNetIdx = 0;
 
 static bool tryConnectWifi(size_t idx, uint32_t timeoutMs = 20000) {
@@ -732,11 +753,14 @@ static bool postBatch() {
     }
   }
 
-  static Sample chunk[POST_CHUNK];
+  ingestMaybeRetryPrimary();
+
+  Sample chunk[POST_CHUNK];
   const size_t n = ringSnapshot(chunk, POST_CHUNK);
+  const char *url = activeIngestUrl();
 
   Serial.printf("[http] posting %u/%u → %s\n",
-                (unsigned)n, (unsigned)pending, INGEST_URL);
+                (unsigned)n, (unsigned)pending, url);
 
   static WiFiClientSecure secureClient;
   static WiFiClient plainClient;
@@ -750,25 +774,23 @@ static bool postBatch() {
     const Sample &s = chunk[i];
     JsonObject o = samples.add<JsonObject>();
     if (timeOk) o["ts_ms"] = toUnixMs(s.millis_at);
-#ifdef PROFILE_GPS_HALL
-    if (s.has_hall) {
-      o["hall_adc"] = s.hall_adc;
-      o["hall_hz"] = s.hall_hz;
+    if (s.has_imu) {
+      o["ax"] = s.ax;
+      o["ay"] = s.ay;
+      o["az"] = s.az;
+      o["gx"] = s.gx;
+      o["gy"] = s.gy;
+      o["gz"] = s.gz;
+      o["imu_temp_c"] = s.imu_temp_c;
+      o["accel_mag"] = s.accel_mag;
+      o["accel_dyn"] = s.accel_dyn;
+      o["a_lon"] = s.a_lon;
+      o["a_lat"] = s.a_lat;
     }
-#else
-    o["ax"] = s.ax;
-    o["ay"] = s.ay;
-    o["az"] = s.az;
-    o["gx"] = s.gx;
-    o["gy"] = s.gy;
-    o["gz"] = s.gz;
-    o["imu_temp_c"] = s.imu_temp_c;
-    o["accel_mag"] = s.accel_mag;
     if (s.has_dht && !isnan(s.dht_temp_c)) {
       o["dht_temp_c"] = s.dht_temp_c;
       o["dht_humidity"] = s.dht_humidity;
     }
-#endif
     if (s.has_gps) {
       o["gps_lat"] = s.gps_lat;
       o["gps_lon"] = s.gps_lon;
@@ -777,35 +799,36 @@ static bool postBatch() {
       if (!isnan(s.gps_alt_m)) o["gps_alt_m"] = s.gps_alt_m;
       if (!isnan(s.gps_hdop)) o["gps_hdop"] = s.gps_hdop;
       o["gps_satellites"] = s.gps_satellites;
+      o["gps_fresh"] = s.gps_fresh ? 1 : 0;
     }
-#ifndef PROFILE_GPS_HALL
     if (s.has_dr) {
       o["lat_dr"] = s.lat_dr;
       o["lon_dr"] = s.lon_dr;
       o["dr_heading_deg"] = s.heading_dr_deg;
       o["dr_speed_mps"] = s.speed_dr_mps;
     }
-#endif
   }
 
   String body;
   serializeJson(doc, body);
 
   HTTPClient http;
-  http.setTimeout(15000);
-  http.setReuse(false);
-
-  const bool isHttps = String(INGEST_URL).startsWith("https://");
+  const bool isHttps = String(url).startsWith("https://");
+  // 區網 HTTP：reuse + 短 timeout；HTTPS 隧道較慢
+  http.setTimeout(isHttps ? 15000 : 3000);
+  http.setConnectTimeout(isHttps ? 8000 : 1500);
+  http.setReuse(!isHttps);
 
   bool began = false;
   if (isHttps) {
     secureClient.setInsecure();
-    began = http.begin(secureClient, INGEST_URL);
+    began = http.begin(secureClient, url);
   } else {
-    began = http.begin(plainClient, INGEST_URL);
+    began = http.begin(plainClient, url);
   }
   if (!began) {
     Serial.println("[http] begin failed");
+    if (!ingestUseFallback) ingestPreferFallback("begin");
     return false;
   }
   http.addHeader("Content-Type", "application/json");
@@ -821,53 +844,68 @@ static bool postBatch() {
                   code, (unsigned)n, (unsigned)ringSize());
     return true;
   }
+
   Serial.printf("[http] fail code=%d body=%s (kept ring=%u)\n",
                 code, resp.c_str(), (unsigned)ringSize());
+  // 連線失敗 / 5xx → 切公開站；401 留下排錯
+  if (!ingestUseFallback && (code < 0 || code >= 500)) {
+    ingestPreferFallback(code < 0 ? "conn" : "5xx");
+  }
   return false;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
-#ifdef PROFILE_GPS_HALL
-  Serial.println("\n[boot] ESP32 GPS+Hall (PROFILE_GPS_HALL)");
-#else
-  Serial.println("\n[boot] ESP32 ICM42688+DHT11+GPS+DR (ring+NTP+core1 sample)");
-  Serial.println("[boot] DR: keep still ~8s for gyro bias (200 samples @25Hz)");
-#endif
+  Serial.println("\n[boot] ESP32 ICM42688(SPI)+DHT11+GPS+ESKF (ring+NTP+core1 sample)");
+  Serial.println("[boot] ESKF: keep still ~4s for gyro bias (200 samples @50Hz)");
   Serial.printf("[boot] device_id=%s ring cap=%u (~%us @25Hz) heap=%u\n",
                 DEVICE_ID, (unsigned)RING_CAP, (unsigned)(RING_CAP / 25),
                 (unsigned)ESP.getFreeHeap());
 
   connectWifi();
 
-  analogSetPinAttenuation(PIN_HALL, ADC_11db);
-  pinMode(PIN_HALL, INPUT);
-
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
-  Serial.printf("[gps] UART1 @ %lu baud, rx=%d tx=%d\n",
+  Serial.printf("[gps] M10-180C UART1 @ %lu baud, rx=%d tx=%d\n",
                 (unsigned long)GPS_BAUD, PIN_GPS_RX, PIN_GPS_TX);
-  delay(100);
-  gpsSetRate5Hz();
+  delay(200);
+  gpsConfigure();
 
-#ifndef PROFILE_GPS_HALL
-  Wire.begin(PIN_SDA, PIN_SCL);
-  Wire.setClock(400000);
-
+  // DHT11 需要外部 4.7k pull-up；內部上拉當保險
+  pinMode(PIN_DHT, INPUT_PULLUP);
   dht.begin();
-  delay(1000);
-
-  if (!icmInit()) {
-    Serial.println("[icm] init FAILED — check wiring / I2C addr");
-  } else {
-    Serial.println("[icm] ready ±16g / ±2000dps");
+  delay(1500);
+  Serial.printf("[dht] probe pin=GPIO%d ...\n", PIN_DHT);
+  bool dhtReady = false;
+  for (int i = 0; i < 5; i++) {
+    if (dhtTryRead(true)) {
+      dhtReady = true;
+      Serial.printf("[dht] ok T=%.1f H=%.1f\n", (double)lastDhtTemp,
+                    (double)lastDhtHum);
+      break;
+    }
+    Serial.printf("[dht] read fail try=%d\n", i + 1);
+    delay(2200);
   }
-#else
-  Serial.printf("[hall] ADC GPIO%d high>=%d low<=%d\n",
-                PIN_HALL, HALL_ADC_HIGH, HALL_ADC_LOW);
-#endif
+  if (!dhtReady) {
+    Serial.println("[dht] FAILED — check VCC/GND/DATA + 4.7k pull-up "
+                   "(or #define PIN_DHT 4 in secrets.h + rewire)");
+  }
 
-  xTaskCreatePinnedToCore(sampleTask, "sample", 4096, nullptr, 1, nullptr, 1);
+  Serial.printf("[icm] SPI SCK=%d MISO=%d MOSI=%d CS=%d\n", ICM_SPI_SCK,
+                ICM_SPI_MISO, ICM_SPI_MOSI, ICM_SPI_CS);
+  if (!icmInit()) {
+    Serial.println("[icm] init FAILED — check SPI wiring / CS not floating");
+  } else {
+    Serial.println("[icm] ready ±16g / ±2000dps (SPI)");
+  }
+
+  Serial.printf("[http] primary=%s\n", INGEST_URL);
+  if (INGEST_URL_FALLBACK[0] != '\0') {
+    Serial.printf("[http] fallback=%s\n", INGEST_URL_FALLBACK);
+  }
+
+  xTaskCreatePinnedToCore(sampleTask, "sample", 8192, nullptr, 1, nullptr, 1);
 }
 
 void loop() {
@@ -875,10 +913,8 @@ void loop() {
   static uint32_t lastStat = 0;
   static uint32_t lastWifi = 0;
   static uint32_t lastNtpResync = 0;
-#ifndef PROFILE_GPS_HALL
   static uint32_t lastImuOk = 0;
   static uint32_t lastImuFail = 0;
-#endif
 
   uint32_t now = millis();
 
@@ -900,33 +936,8 @@ void loop() {
     lastStat = now;
     GpsFix fix{};
     bool gpsOk = gpsSnapshot(fix);
-    int hallAdc = 0;
-    float hallHz = 0;
-    hallSnapshot(hallAdc, hallHz);
 
-#ifdef PROFILE_GPS_HALL
-    Serial.printf("[stat] ring=%u ntp=%d hall_adc=%d hall_hz=%.1f "
-                  "gps=%d sats=%lu/%lu hdop=%.1f sentences=%lu chars=%lu badck=%lu "
-                  "locValid=%d age=%lu\n",
-                  (unsigned)ringSize(),
-                  timeOk ? 1 : 0, hallAdc, hallHz,
-                  gpsOk ? 1 : 0,
-                  (unsigned long)fix.satellites,
-                  (unsigned long)(gps.satellites.isValid() ? gps.satellites.value() : 0),
-                  gps.hdop.isValid() ? (double)gps.hdop.hdop() : -1.0,
-                  (unsigned long)gpsSentenceCount,
-                  (unsigned long)gps.charsProcessed(),
-                  (unsigned long)gps.failedChecksum(),
-                  gps.location.isValid() ? 1 : 0,
-                  (unsigned long)gps.location.age());
-#else
-    float h = dht.readHumidity();
-    float t = dht.readTemperature();
-    if (!isnan(h) && !isnan(t)) {
-      lastDhtHum = h;
-      lastDhtTemp = t;
-      dhtOk = true;
-    }
+    dhtTryRead(dhtFailStreak > 0);
 
     const uint32_t ok = imuOkCount;
     const uint32_t fail = imuFailCount;
@@ -934,10 +945,12 @@ void loop() {
     const uint32_t failDelta = fail - lastImuFail;
     lastImuOk = ok;
     lastImuFail = fail;
-    Serial.printf("[stat] dht=%.1f/%.1f ring=%u imu_ok=%lu/2s fail=%lu ntp=%d "
+    Serial.printf("[stat] dht=%.1f/%.1f ok=%d fail=%lu ring=%u imu_ok=%lu/2s fail=%lu ntp=%d "
                   "gps=%d sats=%lu/%lu hdop=%.1f sentences=%lu chars=%lu badck=%lu "
                   "locValid=%d age=%lu\n",
-                  t, h, (unsigned)ringSize(),
+                  (double)lastDhtTemp, (double)lastDhtHum, dhtOk ? 1 : 0,
+                  (unsigned long)dhtFailStreak,
+                  (unsigned)ringSize(),
                   (unsigned long)okDelta, (unsigned long)failDelta,
                   timeOk ? 1 : 0, gpsOk ? 1 : 0,
                   (unsigned long)fix.satellites,
@@ -948,7 +961,6 @@ void loop() {
                   (unsigned long)gps.failedChecksum(),
                   gps.location.isValid() ? 1 : 0,
                   (unsigned long)gps.location.age());
-#endif
 
     static uint32_t lastNmeaDump = 0;
     if (now - lastNmeaDump > 10000) {
@@ -966,7 +978,12 @@ void loop() {
   const uint32_t postEvery =
       (pending > POST_CHUNK * 2) ? POST_BURST_MS : POST_PERIOD_MS;
   if (now - lastPost >= postEvery && pending > 0) {
-    postBatch();
+    // 積壓時連發多包把 ring 抽乾（LAN ~幾十 ms/包）
+    const int bursts = (pending > POST_CHUNK * 3) ? 5 : (pending > POST_CHUNK ? 2 : 1);
+    for (int i = 0; i < bursts; i++) {
+      if (!postBatch()) break;
+      if (ringSize() == 0) break;
+    }
     lastPost = millis();
   }
 }

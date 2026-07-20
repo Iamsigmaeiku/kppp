@@ -17,7 +17,7 @@ INFLUX_TOKEN=kpp-dev-influx-token-change-me
 INFLUX_ORG=kpp
 INFLUX_BUCKET=decoder
 TELEMETRY_INGEST_TOKEN=kpp-telemetry-ingest-token-change-me
-GRAFANA_EMBED_URL=http://192.168.0.105:3000/grafana/d/kart-telemetry/karting?orgId=1&kiosk&theme=dark&refresh=2s
+GRAFANA_EMBED_URL=http://192.168.0.105:3000/grafana/d/kart-telemetry/kart-telemetry-f1?orgId=1&kiosk&theme=dark&refresh=2s
 ```
 
 在 Pi 上：`bash infra/pi/bootstrap.sh`  

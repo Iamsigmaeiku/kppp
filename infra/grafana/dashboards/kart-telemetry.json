@@ -9,46 +9,17 @@
   "links": [],
   "panels": [
     {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influxdb-kpp"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "unit": "accG"
-        },
-        "overrides": []
-      },
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 1,
+        "w": 24,
         "x": 0,
         "y": 0
       },
-      "id": 1,
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influxdb-kpp"
-          },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\")\n  |> filter(fn: (r) => r._field == \"ax\" or r._field == \"ay\" or r._field == \"az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
-          "refId": "A"
-        }
-      ],
-      "title": "加速度 Accel XYZ (g)",
-      "type": "timeseries"
+      "id": 100,
+      "panels": [],
+      "title": "Overview",
+      "type": "row"
     },
     {
       "datasource": {
@@ -58,38 +29,121 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never",
-            "spanNulls": true
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
           },
-          "unit": "dps"
+          "unit": "velocitymps"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 1
       },
-      "id": 2,
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "targets": [
         {
           "datasource": {
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\")\n  |> filter(fn: (r) => r._field == \"gx\" or r._field == \"gy\" or r._field == \"gz\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"gps_speed_mps\")\n  |> last()",
           "refId": "A"
         }
       ],
-      "title": "角速度 Gyro XYZ (dps)",
-      "type": "timeseries"
+      "title": "GPS 時速",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 4
+              },
+              {
+                "color": "green",
+                "value": 8
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"gps_satellites\")\n  |> last()",
+          "refId": "A"
+        }
+      ],
+      "title": "衛星",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -114,19 +168,19 @@
               },
               {
                 "color": "red",
-                "value": 4
+                "value": 5
               }
             ]
           },
-          "unit": "accG"
+          "unit": "none"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 6,
         "w": 6,
-        "x": 0,
-        "y": 8
+        "x": 12,
+        "y": 1
       },
       "id": 3,
       "options": {
@@ -146,11 +200,11 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r._field == \"accel_mag\")\n  |> last()",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"gps_hdop\")\n  |> last()",
           "refId": "A"
         }
       ],
-      "title": "|a| 合成加速度",
+      "title": "HDOP",
       "type": "stat"
     },
     {
@@ -167,28 +221,20 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "green",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 40
-              },
-              {
-                "color": "red",
-                "value": 60
               }
             ]
           },
-          "unit": "celsius"
+          "unit": "degree"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 6,
         "w": 6,
-        "x": 6,
-        "y": 8
+        "x": 18,
+        "y": 1
       },
       "id": 4,
       "options": {
@@ -208,11 +254,11 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r._field == \"imu_temp_c\")\n  |> last()",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"gps_course_deg\")\n  |> last()",
           "refId": "A"
         }
       ],
-      "title": "IMU 溫度",
+      "title": "航向",
       "type": "stat"
     },
     {
@@ -229,28 +275,20 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
-                "value": null
-              },
-              {
                 "color": "green",
-                "value": 20
-              },
-              {
-                "color": "orange",
-                "value": 35
+                "value": null
               }
             ]
           },
-          "unit": "celsius"
+          "unit": "none"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 6,
         "w": 6,
-        "x": 12,
-        "y": 8
+        "x": 0,
+        "y": 7
       },
       "id": 5,
       "options": {
@@ -270,11 +308,11 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r._field == \"dht_temp_c\")\n  |> last()",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"gps_fresh\")\n  |> last()",
           "refId": "A"
         }
       ],
-      "title": "DHT11 環境溫度",
+      "title": "gps_fresh",
       "type": "stat"
     },
     {
@@ -287,34 +325,32 @@
           "color": {
             "mode": "thresholds"
           },
-          "max": 100,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "yellow",
+                "color": "green",
                 "value": null
               },
               {
-                "color": "green",
-                "value": 40
+                "color": "yellow",
+                "value": 1.5
               },
               {
-                "color": "blue",
-                "value": 70
+                "color": "red",
+                "value": 2.5
               }
             ]
           },
-          "unit": "humidity"
+          "unit": "accG"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 6,
         "w": 6,
-        "x": 18,
-        "y": 8
+        "x": 6,
+        "y": 7
       },
       "id": 6,
       "options": {
@@ -334,11 +370,11 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r._field == \"dht_humidity\")\n  |> last()",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"accel_mag\")\n  |> last()",
           "refId": "A"
         }
       ],
-      "title": "DHT11 相對濕度",
+      "title": "|a|",
       "type": "stat"
     },
     {
@@ -349,37 +385,180 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 20,
-            "lineWidth": 2,
-            "showPoints": "never",
-            "spanNulls": true
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1.5
+              },
+              {
+                "color": "red",
+                "value": 2.5
+              }
+            ]
+          },
+          "unit": "accG"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 7
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"accel_dyn\")\n  |> last()",
+          "refId": "A"
+        }
+      ],
+      "title": "accel_dyn",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "celsius"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 14
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 7
       },
-      "id": 7,
+      "id": 8,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "targets": [
         {
           "datasource": {
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\")\n  |> filter(fn: (r) => r._field == \"imu_temp_c\" or r._field == \"dht_temp_c\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r._field == \"imu_temp_c\")\n  |> last()",
           "refId": "A"
         }
       ],
-      "title": "溫度趨勢（IMU / DHT11）",
+      "title": "IMU 溫",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 101,
+      "panels": [],
+      "title": "Telemetry",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "velocitymps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Speed",
       "type": "timeseries"
     },
     {
@@ -394,33 +573,47 @@
           },
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 20,
+            "fillOpacity": 12,
             "lineWidth": 2,
             "showPoints": "never",
             "spanNulls": true
           },
-          "unit": "humidity"
+          "unit": "accG"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 10,
         "w": 12,
-        "x": 12,
-        "y": 14
+        "x": 0,
+        "y": 24
       },
-      "id": 8,
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "targets": [
         {
           "datasource": {
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r._field == \"dht_humidity\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"gy85_ax\" or r._field == \"gy85_ay\" or r._field == \"gy85_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
           "refId": "A"
         }
       ],
-      "title": "濕度趨勢（DHT11）",
+      "title": "GY-85 Accel XYZ",
       "type": "timeseries"
     },
     {
@@ -434,63 +627,35 @@
             "mode": "palette-classic"
           },
           "custom": {
-            "pointSize": {
-              "fixed": 3
-            },
-            "show": "points",
-            "axisBorderShow": false,
-            "axisCenteredZero": true
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
           },
-          "unit": "accG",
-          "min": -2,
-          "max": 2
+          "unit": "accG"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "custom.show",
-                "value": "lines"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "semi-dark-orange",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 2
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 10,
         "w": 12,
-        "x": 0,
-        "y": 21
+        "x": 12,
+        "y": 24
       },
-      "id": 9,
+      "id": 14,
       "options": {
-        "seriesMapping": "auto",
-        "dims": {
-          "frame": 0,
-          "x": "ay",
-          "y": "ax"
-        },
         "legend": {
-          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
           "placement": "bottom"
         },
         "tooltip": {
-          "mode": "single"
+          "mode": "multi",
+          "sort": "none"
         }
       },
       "targets": [
@@ -499,7 +664,284 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and (r._field == \"ax\" or r._field == \"ay\"))\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"mpu_ax\" or r._field == \"mpu_ay\" or r._field == \"mpu_az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
+          "refId": "A"
+        }
+      ],
+      "title": "MPU6050 Accel XYZ",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 102,
+      "panels": [],
+      "title": "Motion",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "accG"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"ax\" or r._field == \"ay\" or r._field == \"az\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Accel XYZ",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "dps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"gx\" or r._field == \"gy\" or r._field == \"gz\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Gyro XYZ",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "accG"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 46
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"accel_mag\" or r._field == \"accel_dyn\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
+          "refId": "A"
+        }
+      ],
+      "title": "|a| / accel_dyn",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "dps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 46
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"gz\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Yaw rate (gz)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "pointSize": 4
+          },
+          "unit": "accG"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 57
+      },
+      "id": 24,
+      "options": {
+        "dims": {
+          "x": "a_lat",
+          "y": "a_lon"
+        },
+        "seriesMapping": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")",
           "refId": "A"
         },
         {
@@ -507,11 +949,11 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "import \"array\"\n\narray.from(rows: [\n  {ay: 1.600000, ax: 0.000000},\n  {ay: 1.596843, ax: 0.100465},\n  {ay: 1.587384, ax: 0.200533},\n  {ay: 1.571660, ax: 0.299810},\n  {ay: 1.549733, ax: 0.397904},\n  {ay: 1.521690, ax: 0.494427},\n  {ay: 1.487642, ax: 0.588999},\n  {ay: 1.447723, ax: 0.681247},\n  {ay: 1.402091, ax: 0.770806},\n  {ay: 1.350925, ax: 0.857323},\n  {ay: 1.294427, ax: 0.940456},\n  {ay: 1.232821, ax: 1.019878},\n  {ay: 1.166350, ax: 1.095275},\n  {ay: 1.095275, ax: 1.166350},\n  {ay: 1.019878, ax: 1.232821},\n  {ay: 0.940456, ax: 1.294427},\n  {ay: 0.857323, ax: 1.350925},\n  {ay: 0.770806, ax: 1.402091},\n  {ay: 0.681247, ax: 1.447723},\n  {ay: 0.588999, ax: 1.487642},\n  {ay: 0.494427, ax: 1.521690},\n  {ay: 0.397904, ax: 1.549733},\n  {ay: 0.299810, ax: 1.571660},\n  {ay: 0.200533, ax: 1.587384},\n  {ay: 0.100465, ax: 1.596843},\n  {ay: 0.000000, ax: 1.600000},\n  {ay: -0.100465, ax: 1.596843},\n  {ay: -0.200533, ax: 1.587384},\n  {ay: -0.299810, ax: 1.571660},\n  {ay: -0.397904, ax: 1.549733},\n  {ay: -0.494427, ax: 1.521690},\n  {ay: -0.588999, ax: 1.487642},\n  {ay: -0.681247, ax: 1.447723},\n  {ay: -0.770806, ax: 1.402091},\n  {ay: -0.857323, ax: 1.350925},\n  {ay: -0.940456, ax: 1.294427},\n  {ay: -1.019878, ax: 1.232821},\n  {ay: -1.095275, ax: 1.166350},\n  {ay: -1.166350, ax: 1.095275},\n  {ay: -1.232821, ax: 1.019878},\n  {ay: -1.294427, ax: 0.940456},\n  {ay: -1.350925, ax: 0.857323},\n  {ay: -1.402091, ax: 0.770806},\n  {ay: -1.447723, ax: 0.681247},\n  {ay: -1.487642, ax: 0.588999},\n  {ay: -1.521690, ax: 0.494427},\n  {ay: -1.549733, ax: 0.397904},\n  {ay: -1.571660, ax: 0.299810},\n  {ay: -1.587384, ax: 0.200533},\n  {ay: -1.596843, ax: 0.100465},\n  {ay: -1.600000, ax: 0.000000},\n  {ay: -1.596843, ax: -0.100465},\n  {ay: -1.587384, ax: -0.200533},\n  {ay: -1.571660, ax: -0.299810},\n  {ay: -1.549733, ax: -0.397904},\n  {ay: -1.521690, ax: -0.494427},\n  {ay: -1.487642, ax: -0.588999},\n  {ay: -1.447723, ax: -0.681247},\n  {ay: -1.402091, ax: -0.770806},\n  {ay: -1.350925, ax: -0.857323},\n  {ay: -1.294427, ax: -0.940456},\n  {ay: -1.232821, ax: -1.019878},\n  {ay: -1.166350, ax: -1.095275},\n  {ay: -1.095275, ax: -1.166350},\n  {ay: -1.019878, ax: -1.232821},\n  {ay: -0.940456, ax: -1.294427},\n  {ay: -0.857323, ax: -1.350925},\n  {ay: -0.770806, ax: -1.402091},\n  {ay: -0.681247, ax: -1.447723},\n  {ay: -0.588999, ax: -1.487642},\n  {ay: -0.494427, ax: -1.521690},\n  {ay: -0.397904, ax: -1.549733},\n  {ay: -0.299810, ax: -1.571660},\n  {ay: -0.200533, ax: -1.587384},\n  {ay: -0.100465, ax: -1.596843},\n  {ay: -0.000000, ax: -1.600000},\n  {ay: 0.100465, ax: -1.596843},\n  {ay: 0.200533, ax: -1.587384},\n  {ay: 0.299810, ax: -1.571660},\n  {ay: 0.397904, ax: -1.549733},\n  {ay: 0.494427, ax: -1.521690},\n  {ay: 0.588999, ax: -1.487642},\n  {ay: 0.681247, ax: -1.447723},\n  {ay: 0.770806, ax: -1.402091},\n  {ay: 0.857323, ax: -1.350925},\n  {ay: 0.940456, ax: -1.294427},\n  {ay: 1.019878, ax: -1.232821},\n  {ay: 1.095275, ax: -1.166350},\n  {ay: 1.166350, ax: -1.095275},\n  {ay: 1.232821, ax: -1.019878},\n  {ay: 1.294427, ax: -0.940456},\n  {ay: 1.350925, ax: -0.857323},\n  {ay: 1.402091, ax: -0.770806},\n  {ay: 1.447723, ax: -0.681247},\n  {ay: 1.487642, ax: -0.588999},\n  {ay: 1.521690, ax: -0.494427},\n  {ay: 1.549733, ax: -0.397904},\n  {ay: 1.571660, ax: -0.299810},\n  {ay: 1.587384, ax: -0.200533},\n  {ay: 1.596843, ax: -0.100465},\n  {ay: 1.600000, ax: -0.000000}\n])",
+          "query": "import \"array\"\narray.from(rows: [{a_lat: 1.6000, a_lon: 0.0000}, {a_lat: 1.5693, a_lon: 0.3121}, {a_lat: 1.4782, a_lon: 0.6123}, {a_lat: 1.3304, a_lon: 0.8889}, {a_lat: 1.1314, a_lon: 1.1314}, {a_lat: 0.8889, a_lon: 1.3304}, {a_lat: 0.6123, a_lon: 1.4782}, {a_lat: 0.3121, a_lon: 1.5693}, {a_lat: 0.0000, a_lon: 1.6000}, {a_lat: -0.3121, a_lon: 1.5693}, {a_lat: -0.6123, a_lon: 1.4782}, {a_lat: -0.8889, a_lon: 1.3304}, {a_lat: -1.1314, a_lon: 1.1314}, {a_lat: -1.3304, a_lon: 0.8889}, {a_lat: -1.4782, a_lon: 0.6123}, {a_lat: -1.5693, a_lon: 0.3121}, {a_lat: -1.6000, a_lon: 0.0000}, {a_lat: -1.5693, a_lon: -0.3121}, {a_lat: -1.4782, a_lon: -0.6123}, {a_lat: -1.3304, a_lon: -0.8889}, {a_lat: -1.1314, a_lon: -1.1314}, {a_lat: -0.8889, a_lon: -1.3304}, {a_lat: -0.6123, a_lon: -1.4782}, {a_lat: -0.3121, a_lon: -1.5693}, {a_lat: -0.0000, a_lon: -1.6000}, {a_lat: 0.3121, a_lon: -1.5693}, {a_lat: 0.6123, a_lon: -1.4782}, {a_lat: 0.8889, a_lon: -1.3304}, {a_lat: 1.1314, a_lon: -1.1314}, {a_lat: 1.3304, a_lon: -0.8889}, {a_lat: 1.4782, a_lon: -0.6123}, {a_lat: 1.5693, a_lon: -0.3121}, {a_lat: 1.6000, a_lon: -0.0000}])",
           "refId": "B"
         }
       ],
-      "title": "Grip / Traction Circle (ay lateral vs ax longitudinal)",
+      "title": "G Force（a_lat × a_lon）",
       "type": "xychart"
     },
     {
@@ -522,118 +964,11 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
-          },
-          "decimals": 1,
-          "max": 120,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 70
-              },
-              {
-                "color": "red",
-                "value": 90
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 6,
-        "x": 12,
-        "y": 21
-      },
-      "id": 10,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influxdb-kpp"
-          },
-          "query": "import \"math\"\n\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and (r._field == \"ax\" or r._field == \"ay\"))\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with _value: (math.sqrt(x: r.ax * r.ax + r.ay * r.ay) / 1.6) * 100.0 }))\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> last()",
-          "refId": "A"
-        }
-      ],
-      "title": "Grip %",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influxdb-kpp"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
             "mode": "palette-classic"
           },
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "unit": "dps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 6,
-        "x": 18,
-        "y": 21
-      },
-      "id": 11,
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influxdb-kpp"
-          },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r._field == \"gz\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
-          "refId": "A"
-        }
-      ],
-      "title": "Yaw Rate Raw (gz) — 尚未含車速修正，僅供同彎道跨圈一致性比對",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influxdb-kpp"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
+            "fillOpacity": 12,
             "lineWidth": 2,
             "showPoints": "never",
             "spanNulls": true
@@ -643,84 +978,51 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 11,
         "w": 12,
-        "x": 0,
-        "y": 31
+        "x": 12,
+        "y": 57
       },
-      "id": 13,
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "targets": [
         {
           "datasource": {
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r._field == \"accel_mag\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"a_lat\" or r._field == \"a_lon\")\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n  |> yield(name: \"max\")",
           "refId": "A"
         }
       ],
-      "title": "G 值時間軸（|a| 合成加速度 Trend）",
+      "title": "G lateral / longitudinal",
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influxdb-kpp"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "max": 120,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 70
-              },
-              {
-                "color": "red",
-                "value": 90
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 31
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
       },
-      "id": 14,
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influxdb-kpp"
-          },
-          "query": "import \"math\"\n\nfrom(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and (r._field == \"ax\" or r._field == \"ay\"))\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with _value: (math.sqrt(x: r.ax * r.ax + r.ay * r.ay) / 1.6) * 100.0 }))\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
-          "refId": "A"
-        }
-      ],
-      "title": "抓地力 % 時間軸（Grip % Trend）",
-      "type": "timeseries"
+      "id": 103,
+      "panels": [],
+      "title": "Track",
+      "type": "row"
     },
     {
       "datasource": {
@@ -742,9 +1044,9 @@
         "h": 14,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 69
       },
-      "id": 12,
+      "id": 30,
       "options": {
         "view": {
           "allLayers": true,
@@ -770,18 +1072,18 @@
         },
         "layers": [
           {
-            "type": "markers",
-            "name": "ESP DR 走線（車速著色）",
+            "type": "route",
+            "name": "DR（speed_mps 著色）",
             "config": {
               "style": {
                 "size": {
-                  "fixed": 4
+                  "fixed": 3
                 },
                 "color": {
                   "field": "speed_mps",
                   "fixed": "dark-green"
                 },
-                "opacity": 0.9
+                "opacity": 0.85
               }
             },
             "location": {
@@ -795,17 +1097,18 @@
             }
           },
           {
-            "type": "markers",
-            "name": "GPS raw（debug 疊圖）",
+            "type": "route",
+            "name": "GPS（gps_speed_mps 著色）",
             "config": {
               "style": {
                 "size": {
-                  "fixed": 7
+                  "fixed": 4
                 },
                 "color": {
-                  "fixed": "semi-dark-orange"
+                  "field": "gps_speed_mps",
+                  "fixed": "dark-blue"
                 },
-                "opacity": 0.55
+                "opacity": 0.9
               }
             },
             "location": {
@@ -826,7 +1129,7 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dr_position\")\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"lat_dr\", \"lon_dr\", \"speed_mps\", \"heading_deg\"])\n  |> sort(columns: [\"_time\"])",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dr_position\" and r.device_id == \"${device}\")\n  |> filter(fn: (r) => r._field == \"lat_dr\" or r._field == \"lon_dr\" or r._field == \"speed_mps\")\n  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"lat_dr\", \"lon_dr\", \"speed_mps\"])\n  |> filter(fn: (r) => exists r.lat_dr and exists r.lon_dr)\n  |> sort(columns: [\"_time\"])",
           "refId": "A"
         },
         {
@@ -834,11 +1137,251 @@
             "type": "influxdb",
             "uid": "influxdb-kpp"
           },
-          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.gps_fix == \"1\")\n  |> filter(fn: (r) => r._field == \"gps_lat\" or r._field == \"gps_lon\" or r._field == \"gps_speed_mps\")\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"gps_lat\", \"gps_lon\", \"gps_speed_mps\"])\n  |> sort(columns: [\"_time\"])",
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"${device}\" and r.gps_fix == \"1\")\n  |> filter(fn: (r) => r._field == \"gps_lat\" or r._field == \"gps_lon\" or r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"gps_lat\", \"gps_lon\", \"gps_speed_mps\"])\n  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon)\n  |> sort(columns: [\"_time\"])",
           "refId": "B"
         }
       ],
-      "title": "賽道走線（ESP DR @25Hz + GPS raw 疊圖）",
+      "title": "賽道走線（$device：DR + GPS，時速著色）",
+      "type": "geomap"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "id": 104,
+      "panels": [],
+      "title": "Fleet",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "velocitymps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "#1 時速"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "#2 時速"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 84
+      },
+      "id": 40,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"esp32-kart-01\")\n  |> filter(fn: (r) => r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"esp32-kart-02\")\n  |> filter(fn: (r) => r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "B"
+        }
+      ],
+      "title": "雙車 GPS 時速",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-kpp"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "velocitymps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 92
+      },
+      "id": 41,
+      "options": {
+        "view": {
+          "allLayers": true,
+          "id": "coords",
+          "lat": 22.74230485,
+          "lon": 120.32173316,
+          "zoom": 19
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": true,
+          "showAttribution": true,
+          "showScale": true,
+          "showMeasure": false
+        },
+        "basemap": {
+          "name": "Google Satellite",
+          "type": "xyz",
+          "config": {
+            "url": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            "attribution": "&copy; Google"
+          }
+        },
+        "layers": [
+          {
+            "type": "route",
+            "name": "#1 esp32-kart-01（藍）",
+            "config": {
+              "style": {
+                "size": {
+                  "fixed": 4
+                },
+                "color": {
+                  "fixed": "blue"
+                },
+                "opacity": 0.9
+              }
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "gps_lat",
+              "longitude": "gps_lon"
+            },
+            "filterData": {
+              "id": "byRefId",
+              "options": "A"
+            }
+          },
+          {
+            "type": "route",
+            "name": "#2 esp32-kart-02（紅）",
+            "config": {
+              "style": {
+                "size": {
+                  "fixed": 4
+                },
+                "color": {
+                  "fixed": "red"
+                },
+                "opacity": 0.9
+              }
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "gps_lat",
+              "longitude": "gps_lon"
+            },
+            "filterData": {
+              "id": "byRefId",
+              "options": "B"
+            }
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"esp32-kart-01\" and r.gps_fix == \"1\")\n  |> filter(fn: (r) => r._field == \"gps_lat\" or r._field == \"gps_lon\" or r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"gps_lat\", \"gps_lon\", \"gps_speed_mps\"])\n  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon)\n  |> sort(columns: [\"_time\"])",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-kpp"
+          },
+          "query": "from(bucket: \"decoder\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"kart_telemetry\" and r.device_id == \"esp32-kart-02\" and r.gps_fix == \"1\")\n  |> filter(fn: (r) => r._field == \"gps_lat\" or r._field == \"gps_lon\" or r._field == \"gps_speed_mps\")\n  |> aggregateWindow(every: 200ms, fn: last, createEmpty: false)\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"gps_lat\", \"gps_lon\", \"gps_speed_mps\"])\n  |> filter(fn: (r) => exists r.gps_lat and exists r.gps_lon)\n  |> sort(columns: [\"_time\"])",
+          "refId": "B"
+        }
+      ],
+      "title": "雙車 GPS 軌跡（#1 藍 / #2 紅）",
       "type": "geomap"
     }
   ],
@@ -847,18 +1390,47 @@
   "tags": [
     "kpp",
     "telemetry",
-    "kart"
+    "kart",
+    "f1-style"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "esp32-kart-01",
+          "value": "esp32-kart-01"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "車輛",
+        "multi": false,
+        "name": "device",
+        "options": [
+          {
+            "selected": true,
+            "text": "esp32-kart-01",
+            "value": "esp32-kart-01"
+          },
+          {
+            "selected": false,
+            "text": "esp32-kart-02",
+            "value": "esp32-kart-02"
+          }
+        ],
+        "query": "esp32-kart-01,esp32-kart-02",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "卡丁車遙測",
+  "title": "Kart Telemetry — F1 Style",
   "uid": "kart-telemetry",
-  "version": 2
+  "version": 1
 }

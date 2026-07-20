@@ -1,0 +1,9 @@
+[Unit]
+Description=KPP legacy port 5000 listener
+
+[Socket]
+ListenStream=127.0.0.1:5000
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

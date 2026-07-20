@@ -21,8 +21,9 @@ from services.decoder_ingest.influx_reader import InfluxReader
 
 from . import session_numbering
 from .avatars import avatar_url_for
-from .deps import get_db
+from .deps import get_current_user, get_db
 from .models import CarBinding, RaceSession, User, public_display_name
+from .template_ctx import template_globals
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,11 @@ def _entry_from_row(
 
 
 @router.get("/leaderboard", response_class=HTMLResponse)
-async def leaderboard_page(request: Request, db: AsyncSession = Depends(get_db)):
+async def leaderboard_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+):
     reader = _get_reader(request)
     laptime = request.app.state.templates.env.filters["laptime"]
 
@@ -151,17 +156,22 @@ async def leaderboard_page(request: Request, db: AsyncSession = Depends(get_db))
     return request.app.state.templates.TemplateResponse(
         request,
         "leaderboard.html",
-        {
-            "alltime_entries": entries,
-            "session_entries": session_entries,
-            "current_session_id": current_session_id,
-            "influx_unavailable": influx_unavailable,
-        },
+        template_globals(
+            user,
+            alltime_entries=entries,
+            session_entries=session_entries,
+            current_session_id=current_session_id,
+            influx_unavailable=influx_unavailable,
+        ),
     )
 
 
 @router.get("/sessions", response_class=HTMLResponse)
-async def sessions_page(request: Request, db: AsyncSession = Depends(get_db)):
+async def sessions_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+):
     reader = _get_reader(request)
     influx_unavailable = False
     sessions = []
@@ -190,17 +200,21 @@ async def sessions_page(request: Request, db: AsyncSession = Depends(get_db)):
     return request.app.state.templates.TemplateResponse(
         request,
         "sessions.html",
-        {
-            "sessions": sessions,
-            "numbering": numbering,
-            "influx_unavailable": influx_unavailable,
-        },
+        template_globals(
+            user,
+            sessions=sessions,
+            numbering=numbering,
+            influx_unavailable=influx_unavailable,
+        ),
     )
 
 
 @router.get("/sessions/{session_id}", response_class=HTMLResponse)
 async def session_detail_page(
-    request: Request, session_id: str, db: AsyncSession = Depends(get_db)
+    request: Request,
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
 ):
     reader = _get_reader(request)
     try:
@@ -236,7 +250,12 @@ async def session_detail_page(
     return request.app.state.templates.TemplateResponse(
         request,
         "session_detail.html",
-        {"session_id": session_id, "summary": summary, "race_session": race_session},
+        template_globals(
+            user,
+            session_id=session_id,
+            summary=summary,
+            race_session=race_session,
+        ),
     )
 
 

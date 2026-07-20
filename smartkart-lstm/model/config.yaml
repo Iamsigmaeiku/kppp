@@ -1,0 +1,88 @@
+# SmartKart GRU lap-time model — hyperparameters + schema mapping
+# Schema discovered 2026-07-19 from Influx bucket `decoder` (see outputs/schema_snapshot.json).
+# DO NOT invent field names; update this file only after re-running discover_schema.py.
+
+influx:
+  # Connection always from env: INFLUX_URL / INFLUX_TOKEN / INFLUX_ORG / INFLUX_BUCKET
+  use_tailscale_rewrite: true
+  tailscale_url: "http://100.102.122.104:8086"
+  range_start: "-30d"
+
+schema:
+  fingerprint: "kart_telemetry+dr_position+decoder_raw_events@2026-07-19"
+  telemetry_measurement: "kart_telemetry"
+  position_measurement: "dr_position"          # preferred fused; falls back to gps_* in telemetry
+  position_fallback_measurement: "position_est"
+  decoder_measurement: "decoder_raw_events"
+  archive_measurement: "session_archive"
+  device_tag: "device_id"
+  # Features actually present in Influx (no 4-wheel speeds — only hall_hz)
+  features:
+    - ax
+    - ay
+    - az
+    - gz
+    - hall_hz
+    - gps_speed_mps
+    - a_lat
+    - a_lon
+  # Position fields tried in order for lap geofence
+  position_sources:
+    - {measurement: "dr_position", lat: "lat_dr", lon: "lon_dr", speed: "speed_mps", heading: "heading_deg"}
+    - {measurement: "position_est", lat: "lat_est", lon: "lon_est", speed: "speed_mps", heading: "heading_deg"}
+    - {measurement: "kart_telemetry", lat: "gps_lat", lon: "gps_lon", speed: "gps_speed_mps", heading: "gps_course_deg", require_gps_fix: true}
+
+# Auto-derived 2026-07-19 from GPS density hotspot near TKS Qiaotou.
+# Provenance: densest 5m cell of gps_fix points; validated ~50s lap cluster.
+# Set confirmed=false to force derive_start_line.py before build_dataset.
+start_line:
+  confirmed: true
+  source: "auto_gps_density_hotspot"
+  lat: 22.741676
+  lon: 120.3220
+  radius_m: 15.0
+  min_lap_sec: 35.0
+  max_lap_sec: 120.0
+  debounce_sec: 20.0
+
+dataset:
+  # Partial-lap prefix resampled to fixed length (NOT rolling last-N)
+  window_size: 50
+  # stride in timesteps along each lap's native timeline before resampling
+  prefix_stride_sec: 1.0
+  min_prefix_sec: 5.0
+  # telemetry resample rate for building a uniform prefix before downsampling to window_size
+  resample_hz: 10.0
+  device_ids: null   # null = all devices with usable GPS/IMU
+  session_gap_sec: 60.0
+
+model:
+  hidden_size: 64
+  num_layers: 1
+  dropout: 0.2
+
+train:
+  seed: 42
+  epochs: 50
+  batch_size: 32
+  lr: 0.001
+  weight_decay: 0.0001
+  loss: "mae"          # mae | mse  (reported metric always MAE seconds)
+  early_stopping_patience: 8
+  val_session_fraction: 0.2
+  min_sessions_for_holdout: 4
+  overfit_mae_gap_abs: 1.5   # seconds
+  overfit_mae_gap_ratio: 3.0
+  checkpoint_dir: "checkpoints"
+  outputs_dir: "outputs"
+
+incremental:
+  min_new_samples: 200
+  replay_ratio: 0.3
+  warm_start_lr: 0.0005
+  epochs: 20
+
+infer:
+  device: "cuda"
+  warmup: 20
+  benchmark_n: 200

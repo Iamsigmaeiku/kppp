@@ -93,6 +93,12 @@ def load_web_config() -> WebAppConfig:
             fast_model=_env("AI_FAST_MODEL") or _env("AI_DEFAULT_MODEL", "auto"),
         )
 
+    grafana_base = _env(
+        "GRAFANA_EMBED_URL",
+        "http://localhost:3000/grafana/d/kart-telemetry/kart-telemetry-f1"
+        "?orgId=1&kiosk=tv&theme=dark&refresh=2s",
+    )
+
     return WebAppConfig(
         sqlite_path=Path(_env("SQLITE_PATH", "services/webapp/kpp.sqlite3")),
         secret_key=secret_key,
@@ -102,9 +108,5 @@ def load_web_config() -> WebAppConfig:
         ai_coach=ai_coach,
         display_timezone=_env("DISPLAY_TIMEZONE", "Asia/Taipei"),
         telemetry_ingest_token=_env("TELEMETRY_INGEST_TOKEN"),
-        grafana_embed_url=_env(
-            "GRAFANA_EMBED_URL",
-            "http://localhost:3000/grafana/d/kart-telemetry/karting"
-            "?orgId=1&kiosk=tv&theme=dark&refresh=2s",
-        ),
+        grafana_embed_url=grafana_base,
     )
