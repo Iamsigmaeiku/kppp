@@ -18,6 +18,7 @@ LAP_HISTORY_MAX = 20
 DEFAULT_CAR_NUMBER_MAP: dict[str, str] = {
     # 現場晶片最後一個 byte（兩個 hex）會漂：68/69/6D/76/77/78…，
     # 一律經 normalize_transponder_id 收到 …77。
+    "14821124C877": "11",
     "14021124C877": "11",
     "140215359577": "12",
     "140210B98377": "13",

@@ -260,8 +260,8 @@ def flux_motion_derived(*, keep: list[str], every: str = "v.windowPeriod") -> st
         f"{_flux_g_norm()}"
         f"  |> map(fn: (r) => ({{ r with\n"
         f"      decel_g: if r.a_lon < 0.0 then 0.0 - r.a_lon else 0.0,\n"
-        f"      grip_g: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n"
-        f"      grip_pct: math.sqrt(r.a_lat * r.a_lat + r.a_lon * r.a_lon)"
+        f"      grip_g: math.sqrt(x: r.a_lat * r.a_lat + r.a_lon * r.a_lon),\n"
+        f"      grip_pct: math.sqrt(x: r.a_lat * r.a_lat + r.a_lon * r.a_lon)"
         f" / {_GRIP_LIMIT_G} * 100.0,\n"
         f"  }}))\n"
         f"  |> keep(columns: [{keep_cols}])"
@@ -933,7 +933,7 @@ def make_kart_telemetry() -> dict:
         panel_stat_query(
             50,
             "煞車力",
-            flux_motion_derived(keep=["decel_g"]) + "\n  |> last()",
+            flux_motion_derived(keep=["decel_g"]) + '\n  |> last(column: "decel_g")',
             0,
             69,
             w=6,
@@ -957,7 +957,7 @@ def make_kart_telemetry() -> dict:
         panel_stat_query(
             52,
             "抓地力",
-            flux_motion_derived(keep=["grip_g"]) + "\n  |> last()",
+            flux_motion_derived(keep=["grip_g"]) + '\n  |> last(column: "grip_g")',
             12,
             69,
             w=6,
@@ -969,7 +969,7 @@ def make_kart_telemetry() -> dict:
         panel_stat_query(
             53,
             "抓地力 %（/1.6g）",
-            flux_motion_derived(keep=["grip_pct"]) + "\n  |> last()",
+            flux_motion_derived(keep=["grip_pct"]) + '\n  |> last(column: "grip_pct")',
             18,
             69,
             w=6,

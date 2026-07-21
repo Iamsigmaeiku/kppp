@@ -344,10 +344,6 @@ class InfluxReader:
         if not laps:
             return []
 
-        if not await self._resolve_car_number(session_id, transponder_id):
-            # 這節沒有登記/綁定這支 transponder 的車號 → 沒有走線可看。
-            return []
-
         session_start = laps[0].recorded_at - timedelta(seconds=laps[0].lap_time + 2)
         session_end = laps[-1].recorded_at + timedelta(seconds=2)
 

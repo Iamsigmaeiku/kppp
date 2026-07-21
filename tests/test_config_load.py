@@ -216,8 +216,8 @@ class TestCarNumberMap:
         monkeypatch.delenv("CAR_NUMBER_MAP", raising=False)
         mapping = _env_car_number_map()
         # normalize_tid maps ...77 suffix already
-        assert "14021124C877" in mapping
-        assert mapping["14021124C877"] == "11"
+        assert "14821124C877" in mapping
+        assert mapping["14821124C877"] == "11"
 
     def test_custom_map(self, monkeypatch):
         monkeypatch.setenv("CAR_NUMBER_MAP", "AABBCCDD1177:42,AABBCCDD2277:99")
