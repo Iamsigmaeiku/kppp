@@ -74,6 +74,20 @@ class LapTrack:
 
 
 @dataclass(slots=True)
+class LapTelemetrySummary:
+    """每圈的速度/G力彙總，供 AI 教練引用。任何欄位在沒有遙測重疊時都是
+    None——呼叫端不可把 None 當 0 用，必須明確判斷「這圈沒有遙測資料」。
+    """
+
+    lap_number: int
+    avg_speed_mps: float | None
+    max_speed_mps: float | None
+    max_lat_g: float | None
+    max_brake_g: float | None
+    brake_event_count: int | None
+
+
+@dataclass(slots=True)
 class AllTimeBestEntry:
     transponder_id: str
     car_number: str
@@ -381,6 +395,125 @@ class InfluxReader:
             )
             lap_start = lap.recorded_at
         return out
+
+    # 跟 Grafana 那邊（scripts/_gen_esp_grafana_dashboards.py）同一套門檻，
+    # 兩邊的「這算不算煞車/這是不是誇張的 G」判斷要一致，不要各自兜一套。
+    _G_CLAMP = 2.0
+    _BRAKE_THRESHOLD_G = 0.25
+
+    async def get_lap_telemetry_summary(
+        self, session_id: str, transponder_id: str
+    ) -> list[LapTelemetrySummary]:
+        """每圈的速度/G力彙總（供 AI 教練併入 prompt）。跟 get_lap_tracks()
+        用同一組圈次時間切點；沒有遙測重疊的圈，各欄位就是 None，不會用 0
+        頂替，避免 AI 把「沒資料」誤讀成「這圈很平穩」。
+        """
+        laps = await self.get_lap_history(session_id, transponder_id)
+        if not laps:
+            return []
+
+        session_start = laps[0].recorded_at - timedelta(seconds=laps[0].lap_time + 2)
+        session_end = laps[-1].recorded_at + timedelta(seconds=2)
+
+        samples = await self._fetch_motion_samples(
+            device_id=self._TRACK_DEVICE_ID, start=session_start, stop=session_end
+        )
+
+        out: list[LapTelemetrySummary] = []
+        lap_start = session_start
+        idx = 0
+        for lap in laps:
+            seg: list[dict] = []
+            while idx < len(samples):
+                sample = samples[idx]
+                if sample["_time"] < lap_start:
+                    idx += 1
+                    continue
+                if sample["_time"] > lap.recorded_at:
+                    break
+                seg.append(sample)
+                idx += 1
+
+            speeds = [s["speed"] for s in seg if s["speed"] is not None]
+            lat_gs = [s["lat_g"] for s in seg if s["lat_g"] is not None]
+            brake_gs = [s["brake_g"] for s in seg if s["brake_g"] is not None]
+
+            out.append(
+                LapTelemetrySummary(
+                    lap_number=lap.lap_number,
+                    avg_speed_mps=sum(speeds) / len(speeds) if speeds else None,
+                    max_speed_mps=max(speeds) if speeds else None,
+                    max_lat_g=max(lat_gs) if lat_gs else None,
+                    max_brake_g=max(brake_gs) if brake_gs else None,
+                    brake_event_count=(
+                        sum(1 for g in brake_gs if g >= self._BRAKE_THRESHOLD_G)
+                        if brake_gs
+                        else None
+                    ),
+                )
+            )
+            lap_start = lap.recorded_at
+        return out
+
+    async def _fetch_motion_samples(
+        self, *, device_id: str, start: datetime, stop: datetime
+    ) -> list[dict]:
+        """跟 flux_motion_derived()（Grafana 那邊）同一套 a_lat/a_lon
+        fallback 邏輯：優先用 ESKF 算好的 a_lat/a_lon，沒有就退回原始
+        ax/az、mpu_ax/mpu_az、gy85_ax/gy85_az。"""
+        start_iso = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        stop_iso = stop.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        query = (
+            f'from(bucket: "{self._config.bucket}") '
+            f'|> range(start: time(v: "{start_iso}"), stop: time(v: "{stop_iso}")) '
+            f'|> filter(fn: (r) => r._measurement == "kart_telemetry" and r.device_id == "{device_id}") '
+            f'|> filter(fn: (r) => r._field == "gps_speed_mps" or r._field == "a_lat" or r._field == "a_lon"'
+            f' or r._field == "ax" or r._field == "az"'
+            f' or r._field == "mpu_ax" or r._field == "mpu_az"'
+            f' or r._field == "gy85_ax" or r._field == "gy85_az") '
+            f'|> aggregateWindow(every: 1s, fn: last, createEmpty: false) '
+            f'|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
+            f'|> sort(columns: ["_time"])'
+        )
+        tables = await self._query(query)
+
+        samples: list[dict] = []
+        for table in tables:
+            for record in table.records:
+                v = record.values
+                ts = record.get_time()
+                if ts is None:
+                    continue
+
+                a_lat = v.get("a_lat")
+                if a_lat is None:
+                    a_lat = v.get("az") if v.get("az") is not None else v.get("mpu_az")
+                    if a_lat is None:
+                        a_lat = v.get("gy85_az")
+                a_lon = v.get("a_lon")
+                if a_lon is None:
+                    a_lon = v.get("ax") if v.get("ax") is not None else v.get("mpu_ax")
+                    if a_lon is None:
+                        a_lon = v.get("gy85_ax")
+
+                lat_g = None
+                brake_g = None
+                if a_lat is not None and a_lon is not None:
+                    a_lat = max(-self._G_CLAMP, min(self._G_CLAMP, float(a_lat)))
+                    a_lon = max(-self._G_CLAMP, min(self._G_CLAMP, float(a_lon)))
+                    lat_g = abs(a_lat)
+                    brake_g = max(0.0, -a_lon)
+
+                speed = v.get("gps_speed_mps")
+                samples.append(
+                    {
+                        "_time": ts,
+                        "speed": float(speed) if speed is not None else None,
+                        "lat_g": lat_g,
+                        "brake_g": brake_g,
+                    }
+                )
+        return samples
 
     async def _resolve_car_number(self, session_id: str, transponder_id: str) -> str | None:
         from .lap_tracker import normalize_transponder_id

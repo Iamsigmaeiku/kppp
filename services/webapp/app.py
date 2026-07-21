@@ -19,7 +19,11 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from services.decoder_ingest.config import load_influx_config
-from services.decoder_ingest.dashboard import app as decoder_app, set_session_started_hook
+from services.decoder_ingest.dashboard import (
+    app as decoder_app,
+    set_session_archived_hook,
+    set_session_started_hook,
+)
 from services.decoder_ingest.influx_reader import InfluxReader
 
 from . import (
@@ -32,6 +36,7 @@ from . import (
     pages,
     position_ws,
     session_control,
+    session_coach,
     session_numbering,
     telemetry,
 )
@@ -134,6 +139,7 @@ def configure_app() -> None:
     app.include_router(avatars.router)
     app.include_router(history.router)
     app.include_router(ai_coach.router)
+    app.include_router(session_coach.router)
     app.include_router(session_control.router)
     app.include_router(telemetry.router)
     app.include_router(position_ws.router)
@@ -155,6 +161,12 @@ def configure_app() -> None:
     # 場次每日編號（見 session_numbering.py）：decoder_ingest 開新場次時
     # 會透過這個 hook 通知，不需要知道 SQLite/編號邏輯本身怎麼運作。
     set_session_started_hook(session_numbering.on_session_started)
+    # 場次歸檔時自動幫每台完成圈的車產生 AI 教練報告（見 session_coach.py）。
+    set_session_archived_hook(
+        lambda session_id, cars: session_coach.on_session_archived(
+            app, session_id, cars
+        )
+    )
 
     async def _lifespan_ping() -> None:
         await _ping_influx(app.state.influx_reader)

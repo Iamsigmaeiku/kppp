@@ -119,3 +119,29 @@ class AiCoachReport(Base):
     status: Mapped[str] = mapped_column(default="done")  # pending|running|done|failed
     error_message: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class SessionAiCoachReport(Base):
+    """場次級 AI 教練報告：不綁 user_id，場次結束時自動幫每台完成圈的車
+    產生一份，任何人瀏覽場次頁都看得到，不需要先綁定車號。跟
+    AiCoachReport（個人綁定制，/profile 用）並存、互不相動——這張表只服務
+    services/webapp/session_coach.py。
+
+    同一 (session_id, transponder_id) 可能有多筆（自動觸發一筆、之後有人
+    手動重新產生又一筆）；UI 取最新一筆。
+    """
+
+    __tablename__ = "session_ai_coach_reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column()
+    transponder_id: Mapped[str] = mapped_column()
+    car_number: Mapped[str] = mapped_column()
+    # "auto_session_end" 或 "manual:<user_id>"，供除錯/稽核用，不影響任何權限判斷。
+    triggered_by: Mapped[str] = mapped_column(default="")
+    model: Mapped[str] = mapped_column(default="")
+    prompt_version: Mapped[str] = mapped_column(default="")
+    response_json: Mapped[str] = mapped_column(default="")
+    status: Mapped[str] = mapped_column(default="pending")  # pending|running|done|failed
+    error_message: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)

@@ -18,6 +18,7 @@ from .dashboard import (
     broadcast_session_info,
     broadcast_session_reset,
     get_reset_hook,
+    get_session_archived_hook,
     get_session_started_hook,
 )
 from .lap_tracker import LapTracker
@@ -100,6 +101,27 @@ async def _on_new_session_started(session_manager: SessionManager) -> None:
     )
 
 
+async def _on_session_archived(session_manager: SessionManager) -> None:
+    """archive_and_reset() 剛歸檔完一節後都要呼叫一次（緊跟在
+    _on_new_session_started 旁邊，四個呼叫點同步呼叫）：通知 webapp 這節
+    有哪些完成圈的車，讓 session_coach.py 幫每台車背景產生 AI 教練報告。
+    hook 內部應該自己 fire-and-forget，這裡只等它把工作排進背景佇列。
+    """
+    session_id = session_manager.last_archived_session_id
+    cars = session_manager.last_archived_cars
+    if not session_id or not cars:
+        return
+    hook = get_session_archived_hook()
+    if hook is None:
+        return
+    try:
+        await hook(session_id, cars)
+    except Exception:
+        logger.exception(
+            "session_archived hook failed (webapp auto AI coach); continuing"
+        )
+
+
 async def _roll_session_if_new_local_day(
     session_manager: SessionManager,
     lap_tracker: LapTracker,
@@ -149,6 +171,7 @@ async def _roll_session_if_new_local_day(
     if on_reset is not None:
         on_reset()
     if with_dashboard:
+        await _on_session_archived(session_manager)
         await _on_new_session_started(session_manager)
         await broadcast_session_reset(
             reset_at=datetime.now(timezone.utc).isoformat()

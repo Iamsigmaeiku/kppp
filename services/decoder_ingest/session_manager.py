@@ -46,6 +46,12 @@ class SessionManager:
     # 是否已拿到「今天第 N 節」編號。重啟/空 reset 先不編號，等第一筆
     # 真實過線再編，避免空殼場次把第 6~9 節燒掉、下一場實賽變成第 10 節。
     numbered: bool = False
+    # 上一次 archive_and_reset() 歸檔的 session_id + 有完成圈的車輛清單，
+    # 供呼叫端（session_lifecycle.py 的 _on_session_archived）讀取後通知
+    # webapp 觸發場次級 AI 教練報告。過濾條件跟 _build_archive_points()
+    # 寫進 session_archive 的那批一致（至少完成一圈才算）。
+    last_archived_session_id: str | None = None
+    last_archived_cars: list[dict] | None = None
 
     @classmethod
     def start_new(cls, *, at: datetime | None = None) -> "SessionManager":
@@ -108,11 +114,13 @@ class SessionManager:
         # 正式一圈的「本圈」補記成這一節的最後一圈，歸檔資料才完整
         # （見 LapTracker.finalize_in_progress_laps 說明）。
         lap_tracker.finalize_in_progress_laps(at=now)
-        points = self._build_archive_points(lap_tracker, at=now, trigger=trigger)
+        points, cars = self._build_archive_points(lap_tracker, at=now, trigger=trigger)
         if points:
             await writer.write_points_now(points)
 
         archived_session_id = self.current_session_id
+        self.last_archived_session_id = archived_session_id
+        self.last_archived_cars = cars
         lap_tracker.reset_session()
         self.current_session_id = _new_session_id(now)
         self.session_started_at = now
@@ -131,8 +139,9 @@ class SessionManager:
 
     def _build_archive_points(
         self, lap_tracker: LapTracker, *, at: datetime, trigger: ResetTrigger
-    ) -> list[Point]:
+    ) -> tuple[list[Point], list[dict]]:
         points: list[Point] = []
+        cars: list[dict] = []
         for state in lap_tracker.all_states():
             # 沒完成任何一圈的噪音過線不要寫進 archive，否則排行榜會出現
             # 「有場次、但 best_lap_time 全 0」的空殼節次。
@@ -159,4 +168,12 @@ class SessionManager:
                 .time(at)
             )
             points.append(point)
-        return points
+            cars.append(
+                {
+                    "transponder_id": state["transponder_id"],
+                    "car_number": state["car_number"],
+                    "registered": bool(state["registered"]),
+                    "lap_count": lap_count,
+                }
+            )
+        return points, cars

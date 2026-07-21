@@ -42,7 +42,11 @@ async def lap_timer_broadcast_loop(
     3. 跨本地日（不論有沒有成績）→ day_rollover
     """
     # Import here to avoid circular dependency with main/session_lifecycle
-    from .session_lifecycle import _on_new_session_started, _roll_session_if_new_local_day
+    from .session_lifecycle import (
+        _on_new_session_started,
+        _on_session_archived,
+        _roll_session_if_new_local_day,
+    )
 
     while not stop_event.is_set():
         if session_manager is not None:
@@ -110,6 +114,7 @@ async def lap_timer_broadcast_loop(
                 on_reset = get_reset_hook()
                 if on_reset is not None:
                     on_reset()
+                await _on_session_archived(session_manager)
                 await _on_new_session_started(session_manager)
                 await broadcast_session_reset(
                     reset_at=datetime.now(timezone.utc).isoformat()

@@ -1,8 +1,12 @@
-"""AI 教練報告：讀 InfluxDB 裡使用者綁定的那節/那支車的每圈圈速，呼叫
-ExpTech 的 OpenAI 相容 chat/completions API 產生賽後文字建議。
+"""AI 教練報告（個人綁定制）：讀 InfluxDB 裡使用者綁定的那節/那支車的每圈
+圈速 + 遙測摘要，呼叫 ExpTech 的 OpenAI 相容 chat/completions API 產生賽後
+文字建議。
 
 產生改為 server-side background job：POST 立刻回 pending，離頁後仍會跑完
 並寫入 SQLite；回 /profile 可 poll status 或靠 SSR 看到結果。
+
+共用邏輯（prompt 組裝、呼叫 LLM、解析回應）在 ai_coach_core.py，
+場次級（不需綁定、場次結束自動產生）的版本見 session_coach.py。
 """
 
 from __future__ import annotations
@@ -10,241 +14,40 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services.decoder_ingest.dashboard import get_lap_tracker, get_session_manager
-from services.decoder_ingest.influx_reader import InfluxReader, LapRecord
-from services.decoder_ingest.lap_tracker import normalize_transponder_id
+from services.decoder_ingest.influx_reader import InfluxReader
 
+from .ai_coach_core import (
+    PROMPT_VERSION,
+    build_user_prompt,
+    call_exptech,
+    load_laps,
+    load_telemetry,
+    parse_report_json,
+    tids_equivalent,
+)
 from .config import AiCoachConfig
 from .deps import get_db, require_user
 from .models import AiCoachReport, CarBinding, User, public_display_name
-
-
-def _tids_equivalent(a: str, b: str) -> bool:
-    return normalize_transponder_id(a) == normalize_transponder_id(b)
-
-
-def _laps_from_live_tracker(session_id: str, transponder_id: str) -> list[LapRecord]:
-    """本節尚未刷進 Influx / 尚未歸檔時，直接從記憶體 lap_tracker 取圈速。"""
-    from datetime import datetime, timezone
-
-    sm = get_session_manager()
-    lt = get_lap_tracker()
-    if sm is None or lt is None:
-        return []
-    if sm.current_session_id != session_id:
-        return []
-    now = datetime.now(timezone.utc)
-    for state in lt.all_states():
-        tid = state.get("transponder_id") or ""
-        if not _tids_equivalent(tid, transponder_id):
-            continue
-        history = state.get("lap_history") or []
-        return [
-            LapRecord(lap_number=i + 1, lap_time=float(t), recorded_at=now)
-            for i, t in enumerate(history)
-            if t and float(t) > 0
-        ]
-    return []
-
-
-async def _load_laps(
-    reader: InfluxReader, session_id: str, transponder_id: str
-) -> list[LapRecord]:
-    try:
-        laps = await reader.get_lap_history(session_id, transponder_id)
-        if laps:
-            return laps
-    except Exception:
-        logger.exception(
-            "ai_coach: Influx lap history failed; trying live tracker session_id=%s",
-            session_id,
-        )
-    return _laps_from_live_tracker(session_id, transponder_id)
-
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ai-coach")
 
-PROMPT_VERSION = "kpp-ai-coach-v1"
 _IN_FLIGHT: set[int] = set()
 _IN_FLIGHT_LOCK = asyncio.Lock()
-
-SYSTEM_PROMPT = """你是一位卡丁車教練。你的任務是根據每圈圈速資料，產生顧客看得懂的賽後文字建議。
-
-語氣：
-- 繁體中文
-- 像教練，不像聊天機器人
-- 直接指出問題
-- 不羞辱顧客
-- 給下一輪可執行目標
-
-限制：
-- 不要保證成績一定進步
-- 不要使用過度專業術語
-- 不要提到不存在的感測資料
-- 不要編造真實 GPS 走線或彎道資訊
-- 不要說正在即時監控，因為這是賽後分析
-- 你僅有的資料是每圈圈速（沒有 sector、沒有煞車/GPS/遙測資料），每一點建議
-  都必須能從圈速數字本身推導，不可虛構走線、煞車點或感測器數據
-
-只能輸出下面這個 JSON 結構本身，不要加任何其他文字、說明或 markdown code fence：
-{
-  "summary": "整體表現摘要",
-  "strengths": ["做得不錯的地方"],
-  "weaknesses": ["可以改進的地方"],
-  "next_run_goals": ["下一輪可執行的具體目標"],
-  "lap_observations": [
-    {"lap_number": 1, "lap_time": 54.2, "delta_to_best": 1.1, "note": "這圈比最佳圈慢了多少、可能代表什麼"}
-  ],
-  "confidence_score": 80
-}
-"""
-
-
-class LapObservation(BaseModel):
-    lap_number: int
-    lap_time: float
-    delta_to_best: float | None = None
-    note: str
-
-
-class AICoachReportSchema(BaseModel):
-    summary: str
-    strengths: list[str] = []
-    weaknesses: list[str] = []
-    next_run_goals: list[str] = []
-    lap_observations: list[LapObservation] = []
-    confidence_score: int
 
 
 class GenerateRequest(BaseModel):
     session_id: str
     transponder_id: str
-
-
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
-
-
-def _strip_code_fence(text: str) -> str:
-    return _FENCE_RE.sub("", text.strip())
-
-
-def _build_user_prompt(
-    *,
-    car_number: str,
-    driver_name: str,
-    best_lap_time: float,
-    laps: list,
-) -> str:
-    average_lap_time = sum(lap.lap_time for lap in laps) / len(laps)
-    payload = {
-        "car_number": car_number,
-        "driver_display_name": driver_name,
-        "lap_count": len(laps),
-        "best_lap_time": round(best_lap_time, 3),
-        "average_lap_time": round(average_lap_time, 3),
-        "laps": [
-            {
-                "lap_number": lap.lap_number,
-                "lap_time": round(lap.lap_time, 3),
-                "delta_to_session_best": round(lap.lap_time - best_lap_time, 3),
-            }
-            for lap in laps
-        ],
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
-async def _call_exptech(ai_config: AiCoachConfig, user_prompt: str) -> str:
-    """呼叫 ExpTech；主模型空回覆時自動 fallback 到 fast/default。"""
-    models: list[str] = []
-    for candidate in (
-        ai_config.auto_chat_model,
-        ai_config.fast_model,
-        ai_config.default_model,
-        "auto",
-    ):
-        if candidate and candidate not in models:
-            models.append(candidate)
-
-    last_error: Exception | None = None
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        for model in models:
-            try:
-                response = await client.post(
-                    f"{ai_config.base_url.rstrip('/')}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {ai_config.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "max_tokens": 2000,
-                        "temperature": 0.3,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-                content = _extract_message_content(data)
-                if content:
-                    if model != models[0]:
-                        logger.info(
-                            "ai_coach: fell back to model=%s after empty/failed primary",
-                            model,
-                        )
-                    return content
-                logger.warning(
-                    "ai_coach: empty content from model=%s finish_reason=%s",
-                    model,
-                    ((data.get("choices") or [{}])[0].get("finish_reason")),
-                )
-                last_error = ValueError(f"model {model} returned empty content")
-            except Exception as exc:
-                logger.warning("ai_coach: model=%s failed: %s", model, exc)
-                last_error = exc
-
-    raise ValueError(
-        f"所有 AI 模型都無法產生內容（tried={models}）：{last_error}"
-    )
-
-
-def _extract_message_content(data: dict) -> str:
-    """相容一般 chat 與 reasoning 模型的回覆欄位。"""
-    choice = (data.get("choices") or [{}])[0]
-    message = choice.get("message") or {}
-    for key in ("content", "reasoning_content", "reasoning"):
-        value = message.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    text = choice.get("text")
-    if isinstance(text, str) and text.strip():
-        return text.strip()
-    return ""
-
-
-def _parse_report_json(content: str) -> AICoachReportSchema:
-    cleaned = _strip_code_fence(content)
-    if not cleaned.lstrip().startswith("{"):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start >= 0 and end > start:
-            cleaned = cleaned[start : end + 1]
-    return AICoachReportSchema.model_validate(json.loads(cleaned))
 
 
 def _report_payload(row: AiCoachReport) -> dict[str, Any]:
@@ -295,17 +98,19 @@ async def _run_report_job(
         if ai_config is None:
             raise RuntimeError("AI coach 尚未設定")
 
-        laps = await _load_laps(reader, session_id, transponder_id)
+        laps = await load_laps(reader, session_id, transponder_id)
         summary_rows = await reader.get_session_summary(session_id)
         if not laps:
             raise ValueError("這節還沒有任何完整的圈速資料")
+
+        telemetry = await load_telemetry(reader, session_id, transponder_id)
 
         summary_row = next(
             (
                 r
                 for r in summary_rows
                 if r.transponder_id.upper() == transponder_id
-                or _tids_equivalent(r.transponder_id, transponder_id)
+                or tids_equivalent(r.transponder_id, transponder_id)
             ),
             None,
         )
@@ -314,14 +119,15 @@ async def _run_report_job(
             if summary_row and summary_row.best_lap_time
             else min(lap.lap_time for lap in laps)
         )
-        user_prompt = _build_user_prompt(
+        user_prompt = build_user_prompt(
             car_number=car_number,
             driver_name=driver_name,
             best_lap_time=best_lap_time,
             laps=laps,
+            telemetry=telemetry,
         )
-        content = await _call_exptech(ai_config, user_prompt)
-        report = _parse_report_json(content)
+        content = await call_exptech(ai_config, user_prompt)
+        report = parse_report_json(content)
         model_name = ai_config.auto_chat_model or ai_config.default_model
 
         async with session_factory() as db:
@@ -399,7 +205,7 @@ async def generate_report(
 
     reader: InfluxReader = request.app.state.influx_reader
     try:
-        laps = await _load_laps(reader, body.session_id, transponder_id)
+        laps = await load_laps(reader, body.session_id, transponder_id)
     except Exception as exc:
         logger.exception(
             "ai_coach: failed to read from InfluxDB (session_id=%s transponder_id=%s)",

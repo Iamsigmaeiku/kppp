@@ -1,5 +1,5 @@
-"""ai_coach.py 的純函式/schema：fence 去除、prompt 組裝、輸出 schema 驗證。
-不呼叫真正的 ExpTech API。"""
+"""ai_coach_core.py 的純函式/schema：fence 去除、prompt 組裝、輸出 schema
+驗證。不呼叫真正的 ExpTech API。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from services.webapp.ai_coach import (
+from services.webapp.ai_coach_core import (
     AICoachReportSchema,
-    _build_user_prompt,
+    _extract_message_content,
     _strip_code_fence,
+    build_user_prompt,
+    parse_report_json,
 )
 
 
@@ -33,7 +35,7 @@ def test_strip_code_fence_passthrough_when_no_fence():
 
 def test_build_user_prompt_shape():
     laps = [_FakeLap(1, 55.0), _FakeLap(2, 53.5)]
-    prompt = _build_user_prompt(
+    prompt = build_user_prompt(
         car_number="42", driver_name="Alice", best_lap_time=53.5, laps=laps
     )
     payload = json.loads(prompt)
@@ -42,6 +44,46 @@ def test_build_user_prompt_shape():
     assert payload["lap_count"] == 2
     assert payload["laps"][0]["delta_to_session_best"] == pytest.approx(1.5)
     assert payload["laps"][1]["delta_to_session_best"] == pytest.approx(0.0)
+    assert payload["has_telemetry_for_any_lap"] is False
+    assert payload["laps"][0]["avg_speed_mps"] is None
+
+
+def test_build_user_prompt_includes_telemetry_when_present():
+    from services.decoder_ingest.influx_reader import LapTelemetrySummary
+
+    laps = [_FakeLap(1, 55.0), _FakeLap(2, 53.5)]
+    telemetry = [
+        LapTelemetrySummary(
+            lap_number=1,
+            avg_speed_mps=12.3,
+            max_speed_mps=16.5,
+            max_lat_g=1.8,
+            max_brake_g=1.1,
+            brake_event_count=5,
+        ),
+        LapTelemetrySummary(
+            lap_number=2,
+            avg_speed_mps=None,
+            max_speed_mps=None,
+            max_lat_g=None,
+            max_brake_g=None,
+            brake_event_count=None,
+        ),
+    ]
+    prompt = build_user_prompt(
+        car_number="11",
+        driver_name="Bob",
+        best_lap_time=53.5,
+        laps=laps,
+        telemetry=telemetry,
+    )
+    payload = json.loads(prompt)
+
+    assert payload["has_telemetry_for_any_lap"] is True
+    assert payload["laps"][0]["avg_speed_mps"] == pytest.approx(12.3)
+    assert payload["laps"][0]["brake_event_count"] == 5
+    assert payload["laps"][1]["avg_speed_mps"] is None
+    assert payload["laps"][1]["brake_event_count"] is None
 
 
 def test_ai_coach_report_schema_rejects_missing_confidence_score():
@@ -58,8 +100,6 @@ def test_ai_coach_report_schema_accepts_minimal_valid_payload():
 
 
 def test_extract_message_content_prefers_content():
-    from services.webapp.ai_coach import _extract_message_content
-
     data = {
         "choices": [
             {
@@ -74,8 +114,6 @@ def test_extract_message_content_prefers_content():
 
 
 def test_extract_message_content_falls_back_to_reasoning():
-    from services.webapp.ai_coach import _extract_message_content
-
     data = {
         "choices": [
             {"message": {"content": "", "reasoning_content": '{"summary":"r","confidence_score":1}'}}
@@ -85,9 +123,7 @@ def test_extract_message_content_falls_back_to_reasoning():
 
 
 def test_parse_report_json_extracts_embedded_object():
-    from services.webapp.ai_coach import _parse_report_json
-
     raw = '這是說明\n{"summary":"ok","confidence_score":55}\n結尾'
-    report = _parse_report_json(raw)
+    report = parse_report_json(raw)
     assert report.summary == "ok"
     assert report.confidence_score == 55

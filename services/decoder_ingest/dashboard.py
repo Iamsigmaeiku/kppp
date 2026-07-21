@@ -46,6 +46,7 @@ _on_reset = None
 _session_manager = None
 _influx_writer = None
 _on_session_started = None
+_on_session_archived = None
 
 
 def set_lap_tracker(tracker) -> None:
@@ -108,6 +109,23 @@ def get_session_started_hook():
     return _on_session_started
 
 
+def set_session_archived_hook(callback) -> None:
+    """註冊一個「場次已歸檔」的 async callback（簽名
+    `callback(session_id: str, cars: list[dict]) -> Awaitable[None]`），在
+    每次 archive_and_reset() 之後（跟 _on_new_session_started 同一批呼叫點）
+    被呼叫一次。`cars` 是這節裡至少完成一圈的每支 transponder（跟寫進
+    session_archive 的過濾條件一致），供 services/webapp 掛上「場次結束
+    自動產生 AI 教練報告」（見 session_coach.py）。callback 應該自己
+    fire-and-forget 背景工作、盡快回傳，不要在這裡等 LLM 呼叫跑完。
+    """
+    global _on_session_archived
+    _on_session_archived = callback
+
+
+def get_session_archived_hook():
+    return _on_session_archived
+
+
 @app.post("/api/session/reset")
 async def reset_session(request: Request) -> dict:
     """場次結束：歸檔後清空。需 Header `X-Session-Reset-Token` 對上
@@ -141,6 +159,11 @@ async def reset_session(request: Request) -> dict:
             pass
     if _on_reset is not None:
         _on_reset()
+    if _on_session_archived is not None and _session_manager.last_archived_cars:
+        try:
+            await _on_session_archived(archived, _session_manager.last_archived_cars)
+        except Exception:
+            pass
     reset_at = datetime.now(timezone.utc).isoformat()
     await broadcast_session_reset(reset_at=reset_at)
     await broadcast_session_info(session_id=new_session_id)
