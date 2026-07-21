@@ -10,7 +10,6 @@ ai_coach_core.py 的 prompt/LLM 呼叫邏輯，資料表各自獨立
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -26,7 +25,10 @@ from .ai_coach_core import (
     PROMPT_VERSION,
     build_user_prompt,
     call_exptech,
+    dump_stored_report,
+    has_any_telemetry,
     load_laps,
+    load_stored_report,
     load_telemetry,
     parse_report_json,
     tids_equivalent,
@@ -52,14 +54,13 @@ def _report_payload(row: SessionAiCoachReport) -> dict[str, Any]:
         "car_number": row.car_number,
         "triggered_by": row.triggered_by,
         "error_message": row.error_message,
+        "report": None,
+        "has_telemetry": False,
     }
     if row.status == "done" and row.response_json:
-        try:
-            body["report"] = json.loads(row.response_json)
-        except (TypeError, ValueError):
-            body["report"] = None
-    else:
-        body["report"] = None
+        report, has_telemetry = load_stored_report(row.response_json)
+        body["report"] = report
+        body["has_telemetry"] = has_telemetry
     return body
 
 
@@ -116,7 +117,9 @@ async def _run_report_job(
             row.status = "done"
             row.model = model_name
             row.prompt_version = PROMPT_VERSION
-            row.response_json = report.model_dump_json()
+            row.response_json = dump_stored_report(
+                report, has_telemetry=has_any_telemetry(telemetry)
+            )
             row.error_message = None
             await db.commit()
     except Exception as exc:
@@ -252,7 +255,12 @@ async def session_report_status(
     tid = transponder_id.strip().upper()
     row = await _get_latest(db, session_id, tid)
     if row is None:
-        return {"status": "none", "report": None, "error_message": None}
+        return {
+            "status": "none",
+            "report": None,
+            "error_message": None,
+            "has_telemetry": False,
+        }
     return _report_payload(row)
 
 

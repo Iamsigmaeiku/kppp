@@ -141,6 +141,66 @@
             </template>
           </td>
         </tr>
+        <tr>
+          <td colspan="6" class="ai-report-cell">
+            <button
+              :disabled="coachStatus === 'pending' || coachStatus === 'running'"
+              @click="generateCoach()"
+              x-text="(coachStatus === 'pending' || coachStatus === 'running') ? '產生中…可離開此頁' : (coachReport ? '重新產生 AI 教練報告' : '產生 AI 教練報告')"
+            ></button>
+            <template x-if="coachStatus === 'pending' || coachStatus === 'running'">
+              <div class="ai-pending">AI 教練報告產生中…可以先看其他車，回來後會自動更新。</div>
+            </template>
+            <template x-if="coachError && coachStatus === 'failed'">
+              <div class="ai-error" x-text="coachError"></div>
+            </template>
+            <template x-if="coachReport">
+              <details class="ai-report" :open="coachExpanded">
+                <summary @click.prevent="coachExpanded = !coachExpanded">
+                  <span class="ai-summary-preview" x-text="coachReport.summary"></span>
+                  <span class="ai-toggle" x-text="coachExpanded ? '收合' : '展開全文'"></span>
+                </summary>
+                <div class="ai-report-body" x-show="coachExpanded">
+                  <template x-if="!hasTelemetry">
+                    <p style="color:var(--text-faint);font-size:0.8rem;">本次分析僅根據圈速，這節沒有可用的遙測（速度/G力）資料。</p>
+                  </template>
+                  <p x-text="coachReport.summary"></p>
+                  <div class="ai-cols">
+                    <div>
+                      <b style="color:var(--ok);">做得不錯</b>
+                      <ul><template x-for="s in (coachReport.strengths || [])"><li x-text="s"></li></template></ul>
+                    </div>
+                    <div>
+                      <b style="color:var(--warn);">還可以進步</b>
+                      <ul><template x-for="w in (coachReport.weaknesses || [])"><li x-text="w"></li></template></ul>
+                    </div>
+                    <div>
+                      <b style="color:var(--accent);">下次目標</b>
+                      <ul><template x-for="g in (coachReport.next_run_goals || [])"><li x-text="g"></li></template></ul>
+                    </div>
+                  </div>
+                  <template x-if="coachReport.lap_observations && coachReport.lap_observations.length">
+                    <div class="ai-laps">
+                      <b style="color:var(--text-dim);">逐圈觀察</b>
+                      <ul>
+                        <template x-for="obs in coachReport.lap_observations" :key="obs.lap_number">
+                          <li>
+                            <b x-text="'第 ' + obs.lap_number + ' 圈'"></b>
+                            （<span x-text="Number(obs.lap_time).toFixed(3)"></span>s）—
+                            <span x-text="obs.note"></span>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                  <p class="ai-confidence">
+                    信心分數：<span x-text="coachReport.confidence_score"></span>/100
+                  </p>
+                </div>
+              </details>
+            </template>
+          </td>
+        </tr>
       </tbody>
       {% endfor %}
     </table>
@@ -156,6 +216,58 @@ function sessionLapViewer(sessionId, transponderId, track) {
     laps: [],
     selectedLap: null,
     track,
+    coachStatus: 'none',
+    coachReport: null,
+    coachError: null,
+    coachExpanded: false,
+    coachPollTimer: null,
+    hasTelemetry: false,
+    init() {
+      this.fetchCoachStatus();
+    },
+    async fetchCoachStatus() {
+      try {
+        const r = await fetch(`/api/sessions/${sessionId}/coach-reports/${transponderId}`);
+        const d = await r.json();
+        this.coachStatus = d.status || 'none';
+        if (d.report) this.coachReport = d.report;
+        this.hasTelemetry = !!d.has_telemetry;
+        if (d.error_message) this.coachError = d.error_message;
+        if (this.coachStatus === 'pending' || this.coachStatus === 'running') {
+          this.startCoachPoll();
+        } else if (this.coachPollTimer) {
+          clearInterval(this.coachPollTimer);
+          this.coachPollTimer = null;
+        }
+      } catch (e) { /* 靜默失敗，按鈕仍可手動觸發 */ }
+    },
+    async generateCoach() {
+      this.coachError = null;
+      this.coachStatus = 'pending';
+      try {
+        const r = await fetch(`/api/sessions/${sessionId}/coach-reports/${transponderId}`, { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok && r.status !== 202) {
+          const detail = d.detail;
+          throw new Error(
+            typeof detail === 'string' ? detail
+              : Array.isArray(detail) ? detail.map(x => x.msg || JSON.stringify(x)).join('; ')
+              : (detail && detail.message) || ('產生報告失敗 (' + r.status + ')')
+          );
+        }
+        this.coachStatus = d.status || 'pending';
+        if (d.report) this.coachReport = d.report;
+        this.hasTelemetry = !!d.has_telemetry;
+        if (this.coachStatus === 'pending' || this.coachStatus === 'running') this.startCoachPoll();
+      } catch (e) {
+        this.coachStatus = 'failed';
+        this.coachError = e.message || String(e);
+      }
+    },
+    startCoachPoll() {
+      if (this.coachPollTimer) return;
+      this.coachPollTimer = setInterval(() => this.fetchCoachStatus(), 2500);
+    },
     toggle() {
       this.open = !this.open;
       if (this.open && !this.loading && !this.laps.length && !this.error) this.load();

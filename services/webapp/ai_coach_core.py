@@ -156,6 +156,10 @@ def _round_or_none(value: float | None, digits: int = 3) -> float | None:
     return round(value, digits) if value is not None else None
 
 
+def has_any_telemetry(telemetry: list["LapTelemetrySummary"] | None) -> bool:
+    return any(t.avg_speed_mps is not None for t in (telemetry or []))
+
+
 def build_user_prompt(
     *,
     car_number: str,
@@ -265,6 +269,30 @@ async def call_exptech(ai_config: AiCoachConfig, user_prompt: str) -> str:
                     last_error = exc
 
     raise ValueError(f"所有 AI 模型都無法產生內容（tried={models}）：{last_error}")
+
+
+def dump_stored_report(report: AICoachReportSchema, *, has_telemetry: bool) -> str:
+    """存進 SQLite response_json 欄位的格式：report 本體 + 是否有遙測佐證，
+    讓 UI 可以誠實標示「這份報告只根據圈速」而不是每次都暗示有遙測資料。
+    """
+    return json.dumps(
+        {"report": report.model_dump(), "has_telemetry": has_telemetry},
+        ensure_ascii=False,
+    )
+
+
+def load_stored_report(response_json: str) -> tuple[dict | None, bool]:
+    """回傳 (report_dict, has_telemetry)；相容舊格式（直接存 report 本體，
+    沒有 has_telemetry 包裝）。"""
+    if not response_json:
+        return None, False
+    try:
+        data = json.loads(response_json)
+    except (TypeError, ValueError):
+        return None, False
+    if isinstance(data, dict) and "report" in data and "has_telemetry" in data:
+        return data.get("report"), bool(data.get("has_telemetry"))
+    return data, False
 
 
 def parse_report_json(content: str) -> AICoachReportSchema:
