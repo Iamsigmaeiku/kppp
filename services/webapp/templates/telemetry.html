@@ -140,10 +140,6 @@
           |a|=<span x-text="fmt(dev.sample?.accel_mag)"></span>g
           · dyn=<span x-text="fmt(dev.sample?.accel_dyn)"></span>g
         </span>
-        <span x-show="dev.sample?.gy85_heading_deg != null || dev.sample?.mpu_temp_c != null" x-cloak>
-          GY85 hd=<span x-text="fmt(dev.sample?.gy85_heading_deg, 0)"></span>°
-          · MPU T=<span x-text="fmt(dev.sample?.mpu_temp_c)"></span>°C
-        </span>
         <span x-show="dev.sample?.roll_deg != null || dev.sample?.pitch_deg != null" x-cloak>
           EKF roll=<span x-text="fmt(dev.sample?.roll_deg)"></span>°
           · pitch=<span x-text="fmt(dev.sample?.pitch_deg)"></span>°
@@ -155,11 +151,12 @@
               GPS <span x-text="fmt(dev.sample?.gps_lat, 5)"></span>,
               <span x-text="fmt(dev.sample?.gps_lon, 5)"></span>
               · <span x-text="fmt(dev.sample?.gps_speed_mps)"></span>m/s
+              · <span x-text="fmt(dev.sample?.gps_speed_mps != null ? dev.sample.gps_speed_mps * 3.6 : null, 1)"></span>km/h
               · <span x-text="dev.sample?.gps_satellites ?? '—'"></span>顆衛星
             </span>
           </template>
           <template x-if="!hasGpsFix(dev)">
-            <span>GPS 尚未定位</span>
+            <span x-text="gpsSearchingText(dev)"></span>
           </template>
         </span>
       </div>
@@ -247,6 +244,13 @@ function telemetryPage() {
       const lat = dev?.sample?.gps_lat;
       const lon = dev?.sample?.gps_lon;
       return typeof lat === 'number' && typeof lon === 'number';
+    },
+    gpsSearchingText(dev) {
+      const sv = dev?.sample?.gps_satellites;
+      if (typeof sv === 'number') {
+        return `GPS 搜星中 ${sv} 顆`;
+      }
+      return 'GPS 尚未定位';
     },
     isFresh(dev) {
       if (!dev?.received_at) return false;

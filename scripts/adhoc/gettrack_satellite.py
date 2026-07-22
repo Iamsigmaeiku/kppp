@@ -6,7 +6,9 @@ import math
 API_KEY ="AIzaSyDn-3-lOQIxx9rDNAwVA7UAB9HlsOtY6XY"
 LAT, LNG = 22.742304850060208, 120.32173316061305
 ZOOM = 19
-SIZE = "1280x1280"
+# Free Static Maps caps size at 640; scale=2 yields physical 1280×1280.
+# Geographic coverage = 640@z19 → physical MPP ≈ 0.1377 (see track_coords).
+SIZE = "640x640"
 SCALE = 2
 url = "https://maps.googleapis.com/maps/api/staticmap"
 params = {

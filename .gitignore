@@ -10,6 +10,8 @@ services/webapp/kpp.sqlite3
 uploads/
 .pytest_cache/
 ESP32/include/secrets.h
+ESP32/wifi_node/include/secrets.h
+ESP32/sensor_node/include/secrets.h
 ESP32/.pio/
 ESP32/.vscode/
 scripts/_ai_probe_out.txt

@@ -1,7 +1,8 @@
 """ESP32 遙測 ingest：Bearer token 驗證後寫入 InfluxDB measurement kart_telemetry。
 
 若 sample 含 DR 欄位，另寫 measurement dr_position（不覆蓋 gps_* raw）。
-若 sample 含 gps_tracks[]，另寫 measurement gps_track（tag device=m10180c|neo6m）。
+若 sample 含 gps_tracks[]，另寫 measurement gps_track。
+雙板主路徑改走 UDP（見 udp_telemetry.py）；本 HTTP endpoint 仍作 fallback。
 """
 
 from __future__ import annotations
@@ -61,18 +62,7 @@ class TelemetrySample(BaseModel):
     gps_hdop: float | None = None
     gps_satellites: int | None = None
     gps_fresh: float | None = None  # 1=fresh fix, 0=held stale
-    # GY-85 (ADXL345+ITG3205+HMC5883L) — esp32-kart-02 / esp32-imu2-gps
-    gy85_ax: float | None = None
-    gy85_ay: float | None = None
-    gy85_az: float | None = None
-    gy85_gx: float | None = None
-    gy85_gy: float | None = None
-    gy85_gz: float | None = None
-    gy85_mx: float | None = None
-    gy85_my: float | None = None
-    gy85_mz: float | None = None
-    gy85_heading_deg: float | None = None
-    # MPU6050 GY-521 @0x69
+    # MPU6050 on sensor_node (type 0x04) — secondary IMU
     mpu_ax: float | None = None
     mpu_ay: float | None = None
     mpu_az: float | None = None
@@ -80,6 +70,7 @@ class TelemetrySample(BaseModel):
     mpu_gy: float | None = None
     mpu_gz: float | None = None
     mpu_temp_c: float | None = None
+    imu_fault: float | None = None  # 1 if dual-IMU consistency fail
     lat_dr: float | None = None
     lon_dr: float | None = None
     dr_heading_deg: float | None = None
@@ -106,7 +97,8 @@ def _require_ingest_token(request: Request, authorization: str | None) -> None:
 
 
 def _sample_time(sample: TelemetrySample) -> datetime:
-    if sample.ts_ms is not None:
+    # ESP micros()/1000 不是 Unix ms；小於 2020-01-01 的一律當板子 uptime，改用伺服器時間
+    if sample.ts_ms is not None and sample.ts_ms >= 1_577_836_800_000:
         return datetime.fromtimestamp(sample.ts_ms / 1000.0, tz=timezone.utc)
     return datetime.now(timezone.utc)
 
@@ -142,17 +134,6 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
         "gps_hdop": sample.gps_hdop,
         "gps_satellites": sample.gps_satellites,
         "gps_fresh": sample.gps_fresh,
-        # GY-85 / MPU6050：獨立感測器，不進 skip_imu
-        "gy85_ax": sample.gy85_ax,
-        "gy85_ay": sample.gy85_ay,
-        "gy85_az": sample.gy85_az,
-        "gy85_gx": sample.gy85_gx,
-        "gy85_gy": sample.gy85_gy,
-        "gy85_gz": sample.gy85_gz,
-        "gy85_mx": sample.gy85_mx,
-        "gy85_my": sample.gy85_my,
-        "gy85_mz": sample.gy85_mz,
-        "gy85_heading_deg": sample.gy85_heading_deg,
         "mpu_ax": sample.mpu_ax,
         "mpu_ay": sample.mpu_ay,
         "mpu_az": sample.mpu_az,
@@ -160,6 +141,7 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
         "mpu_gy": sample.mpu_gy,
         "mpu_gz": sample.mpu_gz,
         "mpu_temp_c": sample.mpu_temp_c,
+        "imu_fault": sample.imu_fault,
     }
     if not skip_imu:
         fields.update(
@@ -371,6 +353,26 @@ async def ingest_telemetry(
         logger.exception("position broadcast failed device_id=%s", body.device_id)
 
     return {"status": "ok", "written": len(points)}
+
+
+@router.post("/frame-ingest")
+async def ingest_frame_batch(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """wifi_node 熱點模式：POST 與 UDP 相同之 0xAA55 封包串（application/octet-stream）。"""
+    _require_ingest_token(request, authorization)
+    body = await request.body()
+    if not body:
+        return {"status": "ok", "frames": 0}
+
+    server = getattr(request.app.state, "udp_telemetry", None)
+    if server is None:
+        raise HTTPException(
+            status_code=503, detail="binary telemetry decoder not running on server"
+        )
+    frames = server.feed_bytes(body)
+    return {"status": "ok", "frames": frames}
 
 
 @router.get("/status")

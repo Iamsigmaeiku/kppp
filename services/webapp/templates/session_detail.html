@@ -11,6 +11,8 @@
 {% endblock %}
 
 {% block head %}
+<link rel="stylesheet" href="/webapp-static/vendor/leaflet/leaflet.css" />
+<script src="/webapp-static/vendor/leaflet/leaflet.js"></script>
 <style>
   .lap-track-wrap {
     position: relative;
@@ -22,17 +24,7 @@
     overflow: hidden;
     background: #0a0e14;
   }
-  .lap-track-wrap img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    pointer-events: none;
-    user-select: none;
-  }
-  .lap-track-wrap svg {
-    position: absolute;
-    inset: 0;
+  .lap-map {
     width: 100%;
     height: 100%;
   }
@@ -54,6 +46,17 @@
     color: var(--text-dim);
     font-size: 0.82rem;
   }
+  .lap-speed-legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .lap-speed-legend-bar {
+    width: 72px;
+    height: 8px;
+    border-radius: 2px;
+    background: linear-gradient(to right, #73d13d, #fadb14, #ff4d4f);
+  }
 </style>
 {% endblock %}
 
@@ -65,7 +68,7 @@
         <tr><th>排名</th><th>車號</th><th>圈數</th><th>最佳圈速</th><th>末圈</th><th></th></tr>
       </thead>
       {% for r in summary %}
-      <tbody x-data="sessionLapViewer('{{ session_id }}', '{{ r.transponder_id }}', {{ track|tojson }})">
+      <tbody x-data='sessionLapViewer("{{ session_id }}", "{{ r.transponder_id }}", {{ track|tojson }})'>
         <tr class="rank-{{ loop.index }}">
           <td><span class="rank-badge">{{ loop.index }}</span></td>
           <td class="car">{{ r.car_number or r.transponder_id }}</td>
@@ -103,28 +106,20 @@
                   <span>圈速：<b x-text="selectedLapData()?.lap_time_label || '—'"></b></span>
                   <span>來源：<code x-text="selectedLapData()?.source || '—'"></code></span>
                   <span>點數：<b x-text="selectedLapData()?.points?.length || 0"></b></span>
+                  <span class="lap-speed-legend" title="時速著色 0–72 km/h">
+                    <span>慢</span>
+                    <span class="lap-speed-legend-bar" aria-hidden="true"></span>
+                    <span>快</span>
+                  </span>
                 </div>
-                <template x-if="selectedLapPoints().length">
-                  <div class="lap-track-wrap">
-                    <img
-                      src="/webapp-static/tracks/tks_qiaotou_track.png"
-                      alt="TKS 橋頭賽道衛星圖"
-                      width="1280"
-                      height="1280"
-                    />
-                    <svg :viewBox="'0 0 ' + track.imgW + ' ' + track.imgH" preserveAspectRatio="xMidYMid meet">
-                      <polyline
-                        fill="none"
-                        stroke="#60a5fa"
-                        stroke-width="4"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        :points="lapPolyline()"
-                      ></polyline>
-                    </svg>
-                  </div>
-                </template>
-                <template x-if="!selectedLapPoints().length">
+                <div
+                  class="lap-track-wrap"
+                  x-show="selectedLapPoints().length"
+                  x-cloak
+                >
+                  <div class="lap-map" x-ref="lapMap"></div>
+                </div>
+                <template x-if="laps.length && !loading && selectedLap != null && !selectedLapPoints().length">
                   <div class="lap-meta">
                     <span>這圈目前沒有可畫的走線資料。</span>
                   </div>
@@ -141,7 +136,7 @@
             </template>
           </td>
         </tr>
-        <tr>
+        <tr x-show="open" x-cloak>
           <td colspan="6" class="ai-report-cell">
             <button
               :disabled="coachStatus === 'pending' || coachStatus === 'running'"
@@ -222,8 +217,19 @@ function sessionLapViewer(sessionId, transponderId, track) {
     coachExpanded: false,
     coachPollTimer: null,
     hasTelemetry: false,
+    _map: null,
+    _mapLayer: null,
     init() {
       this.fetchCoachStatus();
+      this.$watch('selectedLap', () => {
+        this.$nextTick(() => this.renderLapMap());
+      });
+      this.$watch('open', (v) => {
+        if (v) this.$nextTick(() => this.renderLapMap());
+      });
+      this.$watch('loading', (v) => {
+        if (!v) this.$nextTick(() => this.renderLapMap());
+      });
     },
     async fetchCoachStatus() {
       try {
@@ -294,21 +300,81 @@ function sessionLapViewer(sessionId, transponderId, track) {
     selectedLapPoints() {
       return this.selectedLapData()?.points || [];
     },
-    latlngToPx(lat, lng) {
-      const y_m = (lat - this.track.centerLat) * 111320.0;
-      const x_m = (lng - this.track.centerLng) * (111320.0 * Math.cos(this.track.centerLat * Math.PI / 180));
-      return {
-        px: (this.track.imgW / 2) + x_m / this.track.mpp,
-        py: (this.track.imgH / 2) - y_m / this.track.mpp,
-      };
+    // Grafana continuous-GrYlRd, 0–20 m/s
+    speedToColor(speedMps) {
+      if (speedMps == null || Number.isNaN(speedMps)) return '#60a5fa';
+      const t = Math.max(0, Math.min(1, speedMps / 20));
+      const stops = [
+        [0.0, [115, 209, 61]],   // #73d13d green
+        [0.5, [250, 219, 20]],   // #fadb14 yellow
+        [1.0, [255, 77, 79]],    // #ff4d4f red
+      ];
+      let lo = stops[0], hi = stops[stops.length - 1];
+      for (let i = 0; i < stops.length - 1; i++) {
+        if (t >= stops[i][0] && t <= stops[i + 1][0]) {
+          lo = stops[i];
+          hi = stops[i + 1];
+          break;
+        }
+      }
+      const u = (t - lo[0]) / (hi[0] - lo[0] || 1);
+      const r = Math.round(lo[1][0] + (hi[1][0] - lo[1][0]) * u);
+      const g = Math.round(lo[1][1] + (hi[1][1] - lo[1][1]) * u);
+      const b = Math.round(lo[1][2] + (hi[1][2] - lo[1][2]) * u);
+      return `rgb(${r},${g},${b})`;
     },
-    lapPolyline() {
-      return this.selectedLapPoints()
-        .map((p) => {
-          const xy = this.latlngToPx(p.lat, p.lon);
-          return `${xy.px},${xy.py}`;
-        })
-        .join(' ');
+    ensureMap() {
+      const el = this.$refs.lapMap;
+      if (!el || typeof L === 'undefined') return null;
+      if (this._map) return this._map;
+      this._map = L.map(el, {
+        zoomControl: true,
+        attributionControl: true,
+      });
+      L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+        maxZoom: 22,
+        attribution: '&copy; Google',
+      }).addTo(this._map);
+      this._mapLayer = L.layerGroup().addTo(this._map);
+      return this._map;
+    },
+    renderLapMap() {
+      if (!this.open) return;
+      const pts = this.selectedLapPoints();
+      if (!pts.length) return;
+      const map = this.ensureMap();
+      if (!map || !this._mapLayer) return;
+      this._mapLayer.clearLayers();
+      const latlngs = [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const aLL = [a.lat, a.lon];
+        const bLL = [b.lat, b.lon];
+        latlngs.push(aLL);
+        const speeds = [a.speed_mps, b.speed_mps].filter((s) => s != null && !Number.isNaN(s));
+        const speed = speeds.length
+          ? speeds.reduce((sum, s) => sum + s, 0) / speeds.length
+          : null;
+        L.polyline([aLL, bLL], {
+          color: this.speedToColor(speed),
+          weight: 4,
+          opacity: 0.95,
+          lineCap: 'round',
+          lineJoin: 'round',
+        }).addTo(this._mapLayer);
+      }
+      if (pts.length) latlngs.push([pts[pts.length - 1].lat, pts[pts.length - 1].lon]);
+      const fit = () => {
+        map.invalidateSize();
+        if (latlngs.length) {
+          map.fitBounds(latlngs, { padding: [24, 24], maxZoom: 20 });
+        }
+      };
+      this.$nextTick(() => {
+        fit();
+        setTimeout(fit, 80);
+      });
     },
   };
 }

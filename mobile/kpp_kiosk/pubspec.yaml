@@ -1,0 +1,26 @@
+name: kpp_kiosk
+description: KPP 賽道平板 Hybrid Kiosk（即時圈速／地圖／排行 + WebView）
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.5.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  dio: ^5.7.0
+  shared_preferences: ^2.3.3
+  web_socket_channel: ^3.0.1
+  webview_flutter: ^4.10.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/tracks/tks_qiaotou_track.png

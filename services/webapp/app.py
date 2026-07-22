@@ -39,6 +39,7 @@ from . import (
     session_coach,
     session_numbering,
     telemetry,
+    udp_telemetry,
 )
 from .auth_gate import RequireLoginMiddleware
 from .config import load_web_config
@@ -122,7 +123,10 @@ def configure_app() -> None:
     )
 
     # 先加 Auth、後加 Session → 請求進來時 Session 先跑，session 才有值
-    app.add_middleware(RequireLoginMiddleware)
+    app.add_middleware(
+        RequireLoginMiddleware,
+        kiosk_token=web_config.kiosk_token,
+    )
     app.add_middleware(
         SessionMiddleware,
         secret_key=web_config.secret_key,
@@ -176,6 +180,31 @@ def configure_app() -> None:
     async def _startup_influx_ping() -> None:
         await _lifespan_ping()
         await _sync_admin_flags_from_env()
+        await _start_udp_telemetry()
+
+    @app.on_event("shutdown")
+    async def _shutdown_udp_telemetry() -> None:
+        server = getattr(app.state, "udp_telemetry", None)
+        if server is not None:
+            await server.stop()
+            app.state.udp_telemetry = None
+
+    async def _start_udp_telemetry() -> None:
+        host, port, device_id = udp_telemetry.load_udp_settings()
+        car_map = web_config.telemetry_device_car_map
+        car_id = car_map.get(device_id)
+        server = udp_telemetry.UdpTelemetryServer(
+            app, host=host, port=port, device_id=device_id, car_id=car_id
+        )
+        try:
+            await server.start()
+            app.state.udp_telemetry = server
+        except OSError:
+            logger.exception(
+                "UDP telemetry bind failed on %s:%d — dual-ESP32 path disabled",
+                host,
+                port,
+            )
 
     async def _sync_admin_flags_from_env() -> None:
         emails = getattr(app.state.web_config, "admin_emails", frozenset())

@@ -21,6 +21,15 @@ Grafana（Pi，iframe 嵌入）    webapp FastAPI（Python）
                               瀏覽器（使用者）
 ```
 
+## 目錄結構
+
+```
+kpp/
+├── mobile/
+│   └── kpp_kiosk/           # Flutter 賽道平板 Hybrid Kiosk App
+├── services/
+```
+
 ## 服務說明
 
 | 服務 | 路徑 | 說明 |

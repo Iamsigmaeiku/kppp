@@ -49,6 +49,7 @@ class WebAppConfig:
     grafana_embed_url: str
     telemetry_device_car_map: dict[str, str]
     admin_emails: frozenset[str]
+    kiosk_token: str
 
 
 def _env(name: str, default: str = "") -> str:
@@ -138,4 +139,5 @@ def load_web_config() -> WebAppConfig:
             _env("TELEMETRY_DEVICE_CAR_MAP")
         ),
         admin_emails=_parse_admin_emails(_env("ADMIN_EMAILS")),
+        kiosk_token=_env("KIOSK_TOKEN"),
     )

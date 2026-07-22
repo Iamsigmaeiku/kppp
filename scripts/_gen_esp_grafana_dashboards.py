@@ -854,34 +854,24 @@ def make_kart_telemetry() -> dict:
         panel_row(101, "Telemetry", 13),
         panel_ts(
             12,
-            "Speed",
+            "GPS 時速 (m/s)",
             ["gps_speed_mps"],
             0,
             14,
-            w=24,
+            w=12,
             h=10,
             unit="velocitymps",
             agg="mean",
-            extra_targets=[
-                {
-                    "datasource": DS,
-                    "query": flux_ts_scaled(
-                        "gps_speed_mps", 3.6, new_field="gps_speed_kmh", agg="mean"
-                    ),
-                    "refId": "B",
-                },
-            ],
-            overrides=[
-                {
-                    "matcher": {"id": "byFrameRefID", "options": "B"},
-                    "properties": [
-                        {"id": "displayName", "value": "GPS 時速 (km/h)"},
-                        {"id": "unit", "value": "velocitykmh"},
-                        {"id": "custom.axisPlacement", "value": "right"},
-                        {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
-                    ],
-                },
-            ],
+        ),
+        panel_ts_query(
+            15,
+            "GPS 時速 (km/h)",
+            flux_ts_scaled("gps_speed_mps", 3.6, new_field="gps_speed_kmh", agg="mean"),
+            12,
+            14,
+            w=12,
+            h=10,
+            unit="velocitykmh",
         ),
         panel_ts(
             13,

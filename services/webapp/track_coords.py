@@ -10,6 +10,8 @@ import math
 
 CENTER_LAT = 22.742304850060208
 CENTER_LNG = 120.32173316061305
+# PNG = Static Maps size=640 zoom=19 scale=2 → physical 1280×1280.
+# Same geographic coverage as 640@z19, so physical MPP = z19_mpp / 2 ≈ 0.1377.
 MPP = 0.1377
 IMG_W, IMG_H = 1280, 1280
 CENTER_PX = (IMG_W / 2, IMG_H / 2)

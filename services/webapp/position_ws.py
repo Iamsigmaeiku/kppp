@@ -75,8 +75,6 @@ def extract_position(sample: dict[str, Any] | None) -> dict[str, Any] | None:
     heading = sample.get("dr_heading_deg")
     if not isinstance(heading, (int, float)):
         heading = sample.get("gps_course_deg")
-    if not isinstance(heading, (int, float)):
-        heading = sample.get("gy85_heading_deg")
 
     speed = sample.get("dr_speed_mps")
     if not isinstance(speed, (int, float)):

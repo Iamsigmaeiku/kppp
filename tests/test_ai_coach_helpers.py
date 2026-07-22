@@ -127,3 +127,36 @@ def test_parse_report_json_extracts_embedded_object():
     report = parse_report_json(raw)
     assert report.summary == "ok"
     assert report.confidence_score == 55
+
+
+def test_parse_report_json_repairs_missing_commas_and_trailing_comma():
+    # 模擬 LLM 常見瑕疵：屬性間缺逗號、陣列尾逗號
+    raw = """{
+  "summary": "整體穩定"
+  "strengths": ["節奏不錯",]
+  "weaknesses": ["後半段掉速"]
+  "next_run_goals": ["維持前半節奏"]
+  "lap_observations": [
+    {"lap_number": 1, "lap_time": 50.1, "delta_to_best": 1.2, "note": "熱身圈"}
+    {"lap_number": 3, "lap_time": 48.9, "delta_to_best": 0.0, "note": "最佳圈"}
+  ],
+  "confidence_score": 70,
+}"""
+    report = parse_report_json(raw)
+    assert report.summary == "整體穩定"
+    assert report.confidence_score == 70
+    assert len(report.lap_observations) == 2
+    assert report.lap_observations[1].lap_number == 3
+
+
+def test_parse_report_json_closes_truncated_object():
+    raw = (
+        '{"summary":"截斷測試","strengths":["a"],"weaknesses":[],'
+        '"next_run_goals":[],"lap_observations":['
+        '{"lap_number":1,"lap_time":50.0,"delta_to_best":0.0,"note":"ok"}],'
+        '"confidence_score":66'
+        # 故意少結尾 } —— 模擬 max_tokens 截斷
+    )
+    report = parse_report_json(raw)
+    assert report.summary == "截斷測試"
+    assert report.confidence_score == 66

@@ -92,12 +92,9 @@ def _entry_from_row(
     }
 
 
-@router.get("/leaderboard", response_class=HTMLResponse)
-async def leaderboard_page(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
-):
+async def _leaderboard_payload(
+    request: Request, db: AsyncSession
+) -> dict:
     reader = _get_reader(request)
     laptime = request.app.state.templates.env.filters["laptime"]
 
@@ -153,25 +150,17 @@ async def leaderboard_page(
         logger.exception("leaderboard: failed to read from InfluxDB")
         influx_unavailable = True
 
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "leaderboard.html",
-        template_globals(
-            user,
-            alltime_entries=entries,
-            session_entries=session_entries,
-            current_session_id=current_session_id,
-            influx_unavailable=influx_unavailable,
-        ),
-    )
+    return {
+        "alltime_entries": entries,
+        "session_entries": session_entries,
+        "current_session_id": current_session_id,
+        "influx_unavailable": influx_unavailable,
+    }
 
 
-@router.get("/sessions", response_class=HTMLResponse)
-async def sessions_page(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
-):
+async def _sessions_list_payload(
+    request: Request, db: AsyncSession
+) -> tuple[list, dict[str, dict], bool]:
     reader = _get_reader(request)
     influx_unavailable = False
     sessions = []
@@ -197,6 +186,40 @@ async def sessions_page(
     except Exception:
         logger.exception("sessions: failed to load/backfill session numbering")
 
+    return sessions, numbering, influx_unavailable
+
+
+@router.get("/leaderboard", response_class=HTMLResponse)
+async def leaderboard_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+):
+    payload = await _leaderboard_payload(request, db)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "leaderboard.html",
+        template_globals(user, **payload),
+    )
+
+
+@router.get("/api/leaderboard")
+async def leaderboard_api(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    return JSONResponse(await _leaderboard_payload(request, db))
+
+
+@router.get("/sessions", response_class=HTMLResponse)
+async def sessions_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+):
+    sessions, numbering, influx_unavailable = await _sessions_list_payload(
+        request, db
+    )
     return request.app.state.templates.TemplateResponse(
         request,
         "sessions.html",
@@ -206,6 +229,37 @@ async def sessions_page(
             numbering=numbering,
             influx_unavailable=influx_unavailable,
         ),
+    )
+
+
+@router.get("/api/sessions")
+async def sessions_list_api(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    sessions, numbering, influx_unavailable = await _sessions_list_payload(
+        request, db
+    )
+    items = []
+    for sess in sessions:
+        meta = numbering.get(sess.session_id) or {}
+        session_date = meta.get("session_date")
+        if hasattr(session_date, "isoformat"):
+            session_date = session_date.isoformat()
+        items.append(
+            {
+                "session_id": sess.session_id,
+                "started_at": sess.started_at.isoformat(),
+                "ended_at": sess.ended_at.isoformat(),
+                "session_number": meta.get("session_number"),
+                "session_date": session_date,
+            }
+        )
+    return JSONResponse(
+        {
+            "sessions": items,
+            "influx_unavailable": influx_unavailable,
+        }
     )
 
 
@@ -315,6 +369,7 @@ async def session_lap_tracks_api(
                             "lat": point.lat,
                             "lon": point.lon,
                             "recorded_at": point.recorded_at.isoformat(),
+                            "speed_mps": point.speed_mps,
                         }
                         for point in lap.points
                     ],

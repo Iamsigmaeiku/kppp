@@ -62,6 +62,7 @@ class TrackPoint:
     lat: float
     lon: float
     recorded_at: datetime
+    speed_mps: float | None = None
 
 
 @dataclass(slots=True)
@@ -96,11 +97,7 @@ class AllTimeBestEntry:
 
 
 class InfluxReader:
-    # 目前現場只有 esp32-kart-01（ICM-42688 + GpsImuEskf）這台裝置會寫
-    # gps_track / dr_position 兩個量測，走線圖固定查這台；
-    # esp32-kart-02（GY-85/MPU6050）沒有跑 ESKF，沒有位置輸出。
-    # 日後如果每台實體卡丁車都各自掛一顆會回報位置的 ESP32，這裡要
-    # 改成「car_number → device_id」的對照表，不能再繼續寫死單一裝置。
+    # 雙板 ESKF 寫 dr_position；走線圖查這台 device_id。
     _TRACK_DEVICE_ID = "esp32-kart-01"
 
     def __init__(
@@ -536,6 +533,7 @@ class InfluxReader:
         gps_track = await self._fetch_track_points(
             measurement="gps_track",
             field_map={"lat": "lat", "lon": "lon"},
+            speed_field="speed",
             device_id=device_id,
             start=start,
             stop=stop,
@@ -543,24 +541,31 @@ class InfluxReader:
         if gps_track:
             return gps_track, "gps_track"
 
-        dr_track = await self._fetch_track_points(
-            measurement="dr_position",
-            field_map={"lat_dr": "lat", "lon_dr": "lon"},
-            device_id=device_id,
-            start=start,
-            stop=stop,
-        )
-        if dr_track:
-            return dr_track, "dr_position"
-
+        # 原始 GPS 優先於 DR：實地比對（Grafana geomap）原始 GPS 走線緊貼
+        # 賽道，而 dr_position 是 ESKF 航位推算，飄移時整段軌跡會偏出賽道，
+        # 對「賽後看走線」來說原始 GPS 才是可信基準。只取 gps_fix=1 的樣本，
+        # 避免失鎖期間殘留座標混進來。
         raw_gps = await self._fetch_track_points(
             measurement="kart_telemetry",
             field_map={"gps_lat": "lat", "gps_lon": "lon"},
+            speed_field="gps_speed_mps",
+            device_id=device_id,
+            start=start,
+            stop=stop,
+            extra_tag_filter=' and r.gps_fix == "1"',
+        )
+        if raw_gps:
+            return raw_gps, "kart_telemetry"
+
+        dr_track = await self._fetch_track_points(
+            measurement="dr_position",
+            field_map={"lat_dr": "lat", "lon_dr": "lon"},
+            speed_field="speed_mps",
             device_id=device_id,
             start=start,
             stop=stop,
         )
-        return raw_gps, "kart_telemetry"
+        return dr_track, "dr_position"
 
     async def _fetch_track_points(
         self,
@@ -570,17 +575,27 @@ class InfluxReader:
         device_id: str,
         start: datetime,
         stop: datetime,
+        speed_field: str | None = None,
+        extra_tag_filter: str = "",
     ) -> list[TrackPoint]:
         start_iso = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         stop_iso = stop.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        field_filters = " or ".join(f'r._field == "{field}"' for field in field_map)
-        keep_columns = ", ".join(f'"{field}"' for field in field_map)
+        fields = list(field_map.keys())
+        if speed_field:
+            fields.append(speed_field)
+        field_filters = " or ".join(f'r._field == "{field}"' for field in fields)
+        keep_columns = ", ".join(f'"{field}"' for field in fields)
+        # group() 是關鍵：同一量測會因 tag 組合不同（car_id 有時有有時沒有、
+        # gps_fix 有無）被拆成多個 series，pivot/sort 只在各自 series 內排序，
+        # Python 端逐 table 收點就會把不同時間段交錯接在一起，畫出橫跨全圖
+        # 的鋸齒直線。先 group() 打平再全域排序。
         query = (
             f'from(bucket: "{self._config.bucket}") '
             f'|> range(start: time(v: "{start_iso}"), stop: time(v: "{stop_iso}")) '
-            f'|> filter(fn: (r) => r._measurement == "{measurement}" and r.device_id == "{device_id}") '
+            f'|> filter(fn: (r) => r._measurement == "{measurement}" and r.device_id == "{device_id}"{extra_tag_filter}) '
             f"|> filter(fn: (r) => {field_filters}) "
             f'|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
+            f'|> group() '
             f'|> keep(columns: ["_time", {keep_columns}]) '
             f'|> sort(columns: ["_time"])'
         )
@@ -596,7 +611,19 @@ class InfluxReader:
                 ts = record.get_time()
                 if lat is None or lon is None or ts is None:
                     continue
+                speed_mps: float | None = None
+                if speed_field:
+                    raw_speed = values.get(speed_field)
+                    if raw_speed is not None:
+                        speed_mps = float(raw_speed)
                 points.append(
-                    TrackPoint(lat=float(lat), lon=float(lon), recorded_at=ts)
+                    TrackPoint(
+                        lat=float(lat),
+                        lon=float(lon),
+                        recorded_at=ts,
+                        speed_mps=speed_mps,
+                    )
                 )
+        # 保險再排一次：無論 Flux 端 table 怎麼拆，回到 Python 一律以時間排序。
+        points.sort(key=lambda p: p.recorded_at)
         return points

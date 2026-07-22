@@ -26,13 +26,12 @@ from services.decoder_ingest.influx_reader import InfluxReader
 from .ai_coach_core import (
     PROMPT_VERSION,
     build_user_prompt,
-    call_exptech,
     dump_stored_report,
+    generate_parsed_report,
     has_any_telemetry,
     load_laps,
     load_stored_report,
     load_telemetry,
-    parse_report_json,
     tids_equivalent,
 )
 from .config import AiCoachConfig
@@ -127,8 +126,7 @@ async def _run_report_job(
             laps=laps,
             telemetry=telemetry,
         )
-        content = await call_exptech(ai_config, user_prompt)
-        report = parse_report_json(content)
+        report = await generate_parsed_report(ai_config, user_prompt)
         model_name = ai_config.auto_chat_model or ai_config.default_model
 
         async with session_factory() as db:
