@@ -1,0 +1,7 @@
+==== sensor COM13 ====
+�ͫ�嶧*��Ť'�M��A�&���ʱ�!�Ť'�Q���°�ծgڲ�*��Ť'�Q�°¬k��&Ҹa�Kɹ¸¸꥓�[sensor_node] boot (ICM+MPU+M10, OTA WiFi)
+
+==== wifi COM12 ====
+°�Һ�����ʹ'�E�	u���ʽ��j�U���Ѻ�E���U���*�%��*�%�����٩V�'¬Z���¸��������W¸¬�ɶ'�A�I���W¸¬�A�Vٺ�A��џVٺ�A�i��Vٺ�A�a�ѥ'�q�,�ͫ�嶧*��Ť'�M��A�&���ʱ�!�Ť'�Q���°�ծgڲ�*��Ť'�Q�°¬k��&Ҹa�Kɹ¸¸꥓�[wifi_node] boot HTTP → https://chuck.dctggest.filegear-sg.me/api/telemetry/frame-ingest id=esp32-kart-01
+[wifi] ok 172.20.10.3
+[ota] ready hostname=kpp-wifi

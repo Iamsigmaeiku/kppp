@@ -393,6 +393,76 @@ class InfluxReader:
             lap_start = lap.recorded_at
         return out
 
+    async def _session_time_bounds(
+        self, session_id: str
+    ) -> tuple[datetime, datetime] | None:
+        """場次起訖：started 從 session_id 解析；ended 從 session_archive。
+
+        不依賴 get_lap_history——decoder 沒資料時 GPS 分圈也要能動。
+        無 archive 時 ended = started + 3h。
+        """
+        started = started_at_from_session_id(session_id)
+        if started is None:
+            return None
+
+        query = (
+            f'from(bucket: "{self._config.bucket}") '
+            f"|> range(start: 0) "
+            f'|> filter(fn: (r) => r._measurement == "{self._archive_measurement}" '
+            f'and r.session_id == "{session_id}" and r._field == "lap_count") '
+            f"|> group() "
+            f"|> last()"
+        )
+        ended: datetime | None = None
+        try:
+            tables = await self._query(query)
+            for table in tables:
+                for record in table.records:
+                    ts = record.get_time()
+                    if ts is not None and (ended is None or ts > ended):
+                        ended = ts
+        except Exception:
+            ended = None
+
+        if ended is None:
+            ended = started + timedelta(hours=3)
+        # 略放寬尾端，避免最後幾秒 GPS 被 range stop 切掉
+        return started, ended + timedelta(seconds=2)
+
+    async def get_gps_lap_tracks(self, session_id: str) -> tuple[list, str]:
+        """用虛擬起跑線切 GPS 軌跡成圈。回傳 (laps, source)。
+
+        source 與 _query_track_points 一致（gps_track / kart_telemetry / dr_position）。
+        """
+        from services.webapp.track_coords import (
+            GATE_FORWARD_BEARING_DEG,
+            START_GATE_A_M,
+            START_GATE_B_M,
+        )
+
+        from .gps_lap_splitter import GpsLap, split_laps_by_gate
+
+        bounds = await self._session_time_bounds(session_id)
+        if bounds is None:
+            return [], "none"
+        session_start, session_end = bounds
+
+        points, source = await self._query_track_points(
+            device_id=self._TRACK_DEVICE_ID,
+            start=session_start,
+            stop=session_end,
+        )
+        if not points:
+            return [], source
+
+        laps: list[GpsLap] = split_laps_by_gate(
+            points,
+            START_GATE_A_M,
+            START_GATE_B_M,
+            GATE_FORWARD_BEARING_DEG,
+        )
+        return laps, source
+
     # 跟 Grafana 那邊（scripts/_gen_esp_grafana_dashboards.py）同一套門檻，
     # 兩邊的「這算不算煞車/這是不是誇張的 G」判斷要一致，不要各自兜一套。
     _G_CLAMP = 2.0
@@ -530,6 +600,7 @@ class InfluxReader:
         start: datetime,
         stop: datetime,
     ) -> tuple[list[TrackPoint], str]:
+        # 雙 GPS 不混合：先 m10180c，無資料再 neo6m
         gps_track = await self._fetch_track_points(
             measurement="gps_track",
             field_map={"lat": "lat", "lon": "lon"},
@@ -537,7 +608,18 @@ class InfluxReader:
             device_id=device_id,
             start=start,
             stop=stop,
+            extra_tag_filter=' and r.device == "m10180c"',
         )
+        if not gps_track:
+            gps_track = await self._fetch_track_points(
+                measurement="gps_track",
+                field_map={"lat": "lat", "lon": "lon"},
+                speed_field="speed",
+                device_id=device_id,
+                start=start,
+                stop=stop,
+                extra_tag_filter=' and r.device == "neo6m"',
+            )
         if gps_track:
             return gps_track, "gps_track"
 

@@ -133,6 +133,7 @@
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
+ C:/Users/evand/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src/ArduinoOTA.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFi.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/cores/esp32/IPv6Address.h \
@@ -193,8 +194,11 @@
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/cores/esp32/Udp.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/cores/esp32/cbuf.h \
- src/ByteRing.h C:/Users/evand/Desktop/kpp/ESP32/common/packet.h \
- include/secrets.h \
+ C:/Users/evand/.platformio/packages/framework-arduinoespressif32/libraries/Update/src/Update.h \
+ C:/Users/evand/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.h \
+ C:/Users/evand/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/esp_rom/include/esp_rom_md5.h \
+ src/ByteRing.h C:/Users/evand/Desktop/kpp/ESP32/common/KppOta.h \
+ C:/Users/evand/Desktop/kpp/ESP32/common/packet.h include/secrets.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/libraries/HTTPClient/src/HTTPClient.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiClient.h \
  C:/Users/evand/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src/WiFiClientSecure.h \

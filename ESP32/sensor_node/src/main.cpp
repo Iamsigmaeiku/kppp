@@ -1,35 +1,46 @@
 /**
- * Board #1 sensor_node: ICM42688 + MPU6050 + M10 + 15-state ESKF.
- * Core0: sensors. Core1: ESKF + UART2 TX. NO WiFi.
+ * sensor_node: ICM42688 + MPU6050 + M10 + 15-state ESKF + WiFi upload.
+ * Core0: sensors. Core1: ESKF encode → upload ring + HTTPS/UDP flush.
+ * No inter-board UART (legacy dual-ESP path was wifi_node).
  *
- * UART budget @921600 (~90 KB/s usable):
- *   0x01 ICM FIFO ~1 kHz batched×5 ≈ 20 KB/s
- *   0x04 MPU 200 Hz batched×5 ≈ 4 KB/s
- *   0x02 GPS 10 Hz ≈ 0.6 KB/s
- *   0x03 fused 50 Hz ≈ 2 KB/s
- *   total ≈ 27 KB/s — OK with multi-sample packing.
+ * HTTP mode keeps GPS/FUSED; downsamples raw IMU (HTTPS << sensor rate).
+ * UDP (LAN) uploads full rate.
  */
 #include <Arduino.h>
+#include <ArduinoOTA.h>
+#include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <esp_task_wdt.h>
 #include <math.h>
 #include <string.h>
 
 #include "ByteRing.h"
 #include "GpsImuEskf.h"
 #include "Icm42688Fifo.h"
+#include "KppOta.h"
 #include "Mpu6050.h"
 #include "UbxM10.h"
 #include "packet.h"
+#include "secrets.h"
+
+#if TELEMETRY_USE_HTTP
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#else
+#include <WiFiUdp.h>
+#endif
 
 static constexpr int PIN_GPS_RX = 16;
 static constexpr int PIN_GPS_TX = 17;
-static constexpr int PIN_LINK_TX = 25;
-static constexpr int PIN_LINK_RX = 26;
-static constexpr uint32_t LINK_BAUD = 921600;
+static constexpr int PIN_LED = 2;
 static constexpr uint32_t SENSOR_PERIOD_US = 5000;  // 200 Hz
 static constexpr uint32_t FUSED_PERIOD_US = 20000;  // 50 Hz
+
+static constexpr size_t kUploadRingCap = 20480;
+static constexpr size_t kBatchMtu = 1400;
+static constexpr uint32_t kFlushMs = 20;
 
 /** Dual-IMU blend: ICM dominates (lower noise density). */
 #ifndef DUAL_IMU_W_ICM
@@ -47,16 +58,20 @@ static constexpr uint32_t FUSED_PERIOD_US = 20000;  // 50 Hz
 #endif
 
 static HardwareSerial GpsSerial(1);
-static HardwareSerial LinkSerial(2);
 static Icm42688Fifo icm;
 static Mpu6050 mpu;
 static UbxM10 gps(GpsSerial);
 static GpsImuEskf eskf;
 
-static constexpr size_t kUartRingCap = 12288;
-static uint8_t uartRingStorage[kUartRingCap];
-static ByteRing uartRing(uartRingStorage, kUartRingCap);
-static portMUX_TYPE uartMux = portMUX_INITIALIZER_UNLOCKED;
+#if TELEMETRY_USE_HTTP
+static WiFiClientSecure tls;
+#else
+static WiFiUDP udp;
+#endif
+
+static uint8_t uploadRingStorage[kUploadRingCap];
+static ByteRing uploadRing(uploadRingStorage, kUploadRingCap);
+static portMUX_TYPE uploadMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct ImuMsg {
   IcmFifoSample s;
@@ -77,8 +92,12 @@ static QueueHandle_t gpsQ = nullptr;
 static volatile uint32_t g_tx_imu = 0, g_tx_mpu = 0, g_tx_gps = 0, g_tx_fused = 0;
 static volatile uint8_t g_last_gps_fix = 0, g_last_gps_sv = 0;
 static volatile uint32_t g_drop_imu = 0, g_drop_mpu = 0, g_ring_drop = 0;
+static volatile uint32_t g_up_bytes = 0, g_up_fail = 0;
+static volatile int g_last_http_code = 0;
 static volatile bool g_imu_fault = false;
 static volatile bool g_mpu_ok = false;
+static volatile bool g_wifi_ok = false;
+static volatile bool g_tx_blink = false;
 
 // MPU static bias from 2 s window (parallel to ESKF calib)
 static float g_mpu_bg[3] = {0, 0, 0};
@@ -89,18 +108,57 @@ static double g_mpu_ba_sum[3] = {0, 0, 0};
 static uint32_t g_mpu_bias_n = 0;
 static uint32_t g_mpu_bias_t0 = 0;
 
-static void ringWrite(const uint8_t *data, size_t n) {
-  portENTER_CRITICAL(&uartMux);
-  const size_t before = uartRing.free();
-  uartRing.write(data, n);
-  if (before < n) g_ring_drop++;
-  portEXIT_CRITICAL(&uartMux);
+static size_t ringSize() {
+  portENTER_CRITICAL(&uploadMux);
+  const size_t s = uploadRing.size();
+  portEXIT_CRITICAL(&uploadMux);
+  return s;
 }
 
-static void enqueueFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
+static void ringWrite(const uint8_t *data, size_t n) {
+  portENTER_CRITICAL(&uploadMux);
+  if (n > kUploadRingCap) {
+    portEXIT_CRITICAL(&uploadMux);
+    return;
+  }
+  if (uploadRing.free() < n) {
+    // byte-drop 會切斷 frame → server 解不出；寧可清空舊資料
+    uploadRing.clear();
+    g_ring_drop++;
+  }
+  uploadRing.write(data, n);
+  portEXIT_CRITICAL(&uploadMux);
+}
+
+static size_t ringRead(uint8_t *out, size_t n) {
+  portENTER_CRITICAL(&uploadMux);
+  const size_t got = uploadRing.read(out, n);
+  portEXIT_CRITICAL(&uploadMux);
+  return got;
+}
+
+static bool enqueueFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
+#if TELEMETRY_USE_HTTP
+  // HTTPS 吞吐有限：地圖靠 GPS + fused，不送 raw IMU
+  if (type == KPP_TYPE_IMU || type == KPP_TYPE_MPU) {
+    return false;
+  }
+  if (type == KPP_TYPE_FUSED) {
+    static uint8_t fused_skip = 0;
+    if (++fused_skip < 5) return false;  // 50 Hz → 10 Hz 上傳
+    fused_skip = 0;
+  }
+#endif
+  if (ringSize() > (kUploadRingCap * 3 / 4) &&
+      (type == KPP_TYPE_IMU || type == KPP_TYPE_MPU)) {
+    return false;
+  }
+
   uint8_t frame[KPP_MAX_FRAME];
   const size_t n = kpp_frame_encode(type, payload, len, frame, sizeof(frame));
-  if (n) ringWrite(frame, n);
+  if (!n) return false;
+  ringWrite(frame, n);
+  return true;
 }
 
 static void enqueueImuBatch(uint8_t type, const KppImuSample *samples, size_t n,
@@ -109,17 +167,66 @@ static void enqueueImuBatch(uint8_t type, const KppImuSample *samples, size_t n,
   uint8_t payload[1 + KPP_IMU_MAX_SAMPLES * sizeof(KppImuSample)];
   payload[0] = (uint8_t)n;
   memcpy(payload + 1, samples, n * sizeof(KppImuSample));
-  enqueueFrame(type, payload, (uint8_t)(1 + n * sizeof(KppImuSample)));
-  counter += (uint32_t)n;
+  if (enqueueFrame(type, payload, (uint8_t)(1 + n * sizeof(KppImuSample)))) {
+    counter += (uint32_t)n;
+  }
 }
 
+static void printDiag();
+
+static void ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    g_wifi_ok = true;
+    kppOtaBegin(OTA_HOSTNAME, OTA_PASSWORD);
+    return;
+  }
+  kppOtaReset();
+  g_wifi_ok = false;
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  const uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
+    delay(50);
+  }
+  g_wifi_ok = (WiFi.status() == WL_CONNECTED);
+  if (g_wifi_ok) {
+    Serial.printf("[wifi] ok %s\n", WiFi.localIP().toString().c_str());
+    kppOtaBegin(OTA_HOSTNAME, OTA_PASSWORD);
+  } else {
+    Serial.println("[wifi] connect fail — retry later");
+  }
+}
+
+#if TELEMETRY_USE_HTTP
+static bool sendBatchHttp(const uint8_t *data, size_t n, int *out_code) {
+  if (n == 0) return false;
+  if (out_code) *out_code = -1;
+  tls.setInsecure();
+  HTTPClient http;
+  if (!http.begin(tls, INGEST_FRAME_URL)) {
+    return false;
+  }
+  http.setTimeout(4000);
+  http.addHeader("Content-Type", "application/octet-stream");
+  http.addHeader("Authorization", "Bearer " INGEST_TOKEN);
+  const int code = http.POST((uint8_t *)data, n);
+  http.end();
+  if (out_code) *out_code = code;
+  return code >= 200 && code < 300;
+}
+#endif
+
 static void sensorTask(void *) {
+  esp_task_wdt_delete(nullptr);
+
   IcmFifoSample batch[KPP_IMU_MAX_SAMPLES];
   uint32_t next = micros();
   for (;;) {
     const uint32_t now = micros();
     if ((int32_t)(now - next) < 0) {
-      taskYIELD();
+      vTaskDelay(1);
       continue;
     }
     next += SENSOR_PERIOD_US;
@@ -139,7 +246,6 @@ static void sensorTask(void *) {
       }
     }
 
-    // MPU6050: one sample per 200 Hz tick, own timestamp
     if (g_mpu_ok) {
       MpuSample ms{};
       if (mpu.readSample(ms) && ms.ok) {
@@ -194,9 +300,6 @@ static void updateMpuBias(const MpuSample &s) {
       g_mpu_bg[i] = (float)(g_mpu_bg_sum[i] / (double)g_mpu_bias_n);
       g_mpu_ba[i] = (float)(g_mpu_ba_sum[i] / (double)g_mpu_bias_n);
     }
-    // accel bias = mean - gravity direction: keep horizontal axes only approx
-    // For blend we subtract full mean accel and re-add unit gravity later via ESKF;
-    // store mean as ba so (a - ba) ≈ 0 at rest on each axis relative to calib pose.
     g_mpu_bias_ready = true;
     Serial.printf("[mpu] bias ready n=%u bg=%.4f,%.4f,%.4f\n",
                   (unsigned)g_mpu_bias_n, g_mpu_bg[0], g_mpu_bg[1], g_mpu_bg[2]);
@@ -210,14 +313,16 @@ static void fusionTxTask(void *) {
   size_t icm_acc_n = 0, mpu_acc_n = 0;
   uint32_t last_icm_flush = 0, last_mpu_flush = 0;
 
-  // Latest MPU in physical units (bias-corrected when ready)
   bool have_mpu = false;
   float mpu_ax = 0, mpu_ay = 0, mpu_az = 0;
   float mpu_gx = 0, mpu_gy = 0, mpu_gz = 0;
 
   for (;;) {
+    bool did_work = false;
+
     MpuMsg mm;
     while (xQueueReceive(mpuQ, &mm, 0) == pdTRUE) {
+      did_work = true;
       updateMpuBias(mm.s);
       const float ax = mm.s.ax / Mpu6050::kAccelSens;
       const float ay = mm.s.ay / Mpu6050::kAccelSens;
@@ -254,7 +359,9 @@ static void fusionTxTask(void *) {
         s.temp = mm.s.temp;
       }
       if (mpu_acc_n >= KPP_IMU_MAX_SAMPLES) {
+#if !TELEMETRY_USE_HTTP
         enqueueImuBatch(KPP_TYPE_MPU, mpu_acc, mpu_acc_n, g_tx_mpu);
+#endif
         mpu_acc_n = 0;
         last_mpu_flush = micros();
       }
@@ -262,6 +369,7 @@ static void fusionTxTask(void *) {
 
     ImuMsg im;
     while (xQueueReceive(imuQ, &im, 0) == pdTRUE) {
+      did_work = true;
       float ax = im.s.ax / Icm42688Fifo::kAccelSens;
       float ay = im.s.ay / Icm42688Fifo::kAccelSens;
       float az = im.s.az / Icm42688Fifo::kAccelSens;
@@ -288,7 +396,6 @@ static void fusionTxTask(void *) {
                                (icm_az - mpu_az) * (icm_az - mpu_az));
         fault = (dg > DUAL_IMU_GYRO_MAX_RPS) || (da > DUAL_IMU_ACCEL_MAX_G);
 
-        // Bias-corrected weighted average, then restore ICM ba/bg for onImu
         const float wi = DUAL_IMU_W_ICM;
         const float wm = DUAL_IMU_W_MPU;
         ax = wi * icm_ax + wm * mpu_ax + eo.ba[0];
@@ -322,7 +429,9 @@ static void fusionTxTask(void *) {
         s.temp = im.s.temp;
       }
       if (icm_acc_n >= KPP_IMU_MAX_SAMPLES) {
+#if !TELEMETRY_USE_HTTP
         enqueueImuBatch(KPP_TYPE_IMU, icm_acc, icm_acc_n, g_tx_imu);
+#endif
         icm_acc_n = 0;
         last_icm_flush = micros();
       }
@@ -330,18 +439,23 @@ static void fusionTxTask(void *) {
 
     const uint32_t now = micros();
     if (icm_acc_n > 0 && (now - last_icm_flush) > 10000u) {
+#if !TELEMETRY_USE_HTTP
       enqueueImuBatch(KPP_TYPE_IMU, icm_acc, icm_acc_n, g_tx_imu);
+#endif
       icm_acc_n = 0;
       last_icm_flush = now;
     }
     if (mpu_acc_n > 0 && (now - last_mpu_flush) > 10000u) {
+#if !TELEMETRY_USE_HTTP
       enqueueImuBatch(KPP_TYPE_MPU, mpu_acc, mpu_acc_n, g_tx_mpu);
+#endif
       mpu_acc_n = 0;
       last_mpu_flush = now;
     }
 
     GpsMsg gm;
     while (xQueueReceive(gpsQ, &gm, 0) == pdTRUE) {
+      did_work = true;
       EskfGpsIn gin{};
       gin.lat_deg = gm.p.lat * 1e-7f;
       gin.lon_deg = gm.p.lon * 1e-7f;
@@ -380,6 +494,7 @@ static void fusionTxTask(void *) {
     }
 
     if ((int32_t)(now - next_fused) >= 0) {
+      did_work = true;
       next_fused += FUSED_PERIOD_US;
       const EskfOutput o = eskf.output();
       KppFusedPayload fp{};
@@ -403,24 +518,101 @@ static void fusionTxTask(void *) {
       g_tx_fused++;
     }
 
-    uint8_t chunk[256];
-    size_t avail = 0;
-    portENTER_CRITICAL(&uartMux);
-    avail = uartRing.size();
-    portEXIT_CRITICAL(&uartMux);
-    while (avail > 0 && LinkSerial.availableForWrite() > 0) {
-      const size_t room = (size_t)LinkSerial.availableForWrite();
-      const size_t take = room < sizeof(chunk) ? room : sizeof(chunk);
-      size_t n = 0;
-      portENTER_CRITICAL(&uartMux);
-      n = uartRing.read(chunk, take);
-      avail = uartRing.size();
-      portEXIT_CRITICAL(&uartMux);
-      if (n == 0) break;
-      LinkSerial.write(chunk, n);
+    if (!did_work) {
+      vTaskDelay(1);
+    } else {
+      taskYIELD();
+    }
+  }
+}
+
+static void uploadTask(void *) {
+  // HTTPS POST 會 block 數秒；勿讓 TWDT 因 IDLE 餓死而 reboot
+  esp_task_wdt_delete(nullptr);
+
+  uint8_t batch[kBatchMtu];
+  size_t batch_n = 0;
+  uint32_t last_flush = millis();
+  uint32_t last_diag = millis();
+  uint8_t fail_streak = 0;
+
+  for (;;) {
+    if (WiFi.status() != WL_CONNECTED) {
+      g_wifi_ok = false;
+      batch_n = 0;
+      fail_streak = 0;
+      ensureWifi();
+      delay(100);
+      continue;
+    }
+    g_wifi_ok = true;
+
+    while (batch_n < kBatchMtu) {
+      const size_t room = kBatchMtu - batch_n;
+      const size_t got = ringRead(batch + batch_n, room);
+      if (got == 0) break;
+      batch_n += got;
     }
 
-    taskYIELD();
+    const uint32_t now = millis();
+    const uint32_t flush_ms =
+        ringSize() > (kUploadRingCap / 2) ? 10u : kFlushMs;
+    const bool full = batch_n >= kBatchMtu;
+    const bool timed = batch_n > 0 && (now - last_flush) >= flush_ms;
+    if (full || timed) {
+      bool ok = false;
+#if TELEMETRY_USE_HTTP
+      int http_code = -1;
+      ok = sendBatchHttp(batch, batch_n, &http_code);
+      g_last_http_code = http_code;
+      if (!ok && (http_code < 0)) {
+        WiFi.disconnect(true);
+        g_wifi_ok = false;
+      }
+#else
+      if (udp.beginPacket(SERVER_IP, SERVER_PORT)) {
+        udp.write(batch, batch_n);
+        ok = udp.endPacket();
+      }
+#endif
+      if (ok) {
+        fail_streak = 0;
+        g_up_bytes += (uint32_t)batch_n;
+        g_tx_blink = true;
+        batch_n = 0;
+        last_flush = now;
+      } else {
+        g_up_fail++;
+        fail_streak++;
+#if TELEMETRY_USE_HTTP
+        if (g_up_fail <= 3 || (g_up_fail % 20) == 0) {
+          Serial.printf("[upload] HTTP fail code=%d batch=%u fail=%u streak=%u\n",
+                        g_last_http_code, (unsigned)batch_n, (unsigned)g_up_fail,
+                        (unsigned)fail_streak);
+        }
+#endif
+        if (fail_streak >= 3) {
+          // 避免 dead batch 卡死 ring
+          batch_n = 0;
+          fail_streak = 0;
+          portENTER_CRITICAL(&uploadMux);
+          if (uploadRing.size() > (kUploadRingCap * 3 / 4)) {
+            uploadRing.clear();
+            g_ring_drop++;
+          }
+          portEXIT_CRITICAL(&uploadMux);
+        }
+        delay(50);
+        last_flush = now;
+      }
+    }
+
+    if (now - last_diag >= 1000) {
+      last_diag = now;
+      printDiag();
+    }
+
+    vTaskDelay(1);
   }
 }
 
@@ -446,10 +638,11 @@ static void printDiag() {
       (unsigned)o.zupt_count);
   Serial.printf(
       "[tx] icm=%u mpu=%u gps=%u fused=%u drop_i=%u drop_m=%u ring_ovf=%u "
-      "ring=%u\n",
+      "ring=%u up_B=%u up_fail=%u http=%d wifi=%d\n",
       (unsigned)g_tx_imu, (unsigned)g_tx_mpu, (unsigned)g_tx_gps,
       (unsigned)g_tx_fused, (unsigned)g_drop_imu, (unsigned)g_drop_mpu,
-      (unsigned)g_ring_drop, (unsigned)uartRing.size());
+      (unsigned)g_ring_drop, (unsigned)ringSize(), (unsigned)g_up_bytes,
+      (unsigned)g_up_fail, g_last_http_code, (int)g_wifi_ok);
   const uint32_t gps_rx_bytes = gps.takeRxBytes();
   KppDbgPayload db{};
   db.gps_rx_bps = (uint16_t)(gps_rx_bytes > 65535 ? 65535 : gps_rx_bytes);
@@ -459,12 +652,22 @@ static void printDiag() {
   enqueueFrame(KPP_TYPE_DBG, (const uint8_t *)&db, sizeof(db));
   g_tx_imu = g_tx_mpu = g_tx_gps = g_tx_fused = 0;
   g_drop_imu = g_drop_mpu = g_ring_drop = 0;
+  g_up_bytes = 0;
+  g_up_fail = 0;
 }
 
 void setup() {
   Serial.begin(115200);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
   delay(200);
-  Serial.println("[sensor_node] boot (ICM+MPU+M10)");
+#if TELEMETRY_USE_HTTP
+  Serial.printf("[sensor_node] boot HTTP → %s id=%s\n", INGEST_FRAME_URL,
+                DEVICE_ID);
+#else
+  Serial.printf("[sensor_node] boot UDP → %s:%d id=%s\n", SERVER_IP, SERVER_PORT,
+                DEVICE_ID);
+#endif
 
   if (!icm.begin()) {
     Serial.println("[sensor_node] ICM init FAIL");
@@ -474,14 +677,16 @@ void setup() {
     Serial.println("[sensor_node] MPU init FAIL — continuing ICM-only");
   }
   gps.configure(PIN_GPS_RX, PIN_GPS_TX);
-  LinkSerial.begin(LINK_BAUD, SERIAL_8N1, PIN_LINK_RX, PIN_LINK_TX);
 
   imuQ = xQueueCreate(64, sizeof(ImuMsg));
   mpuQ = xQueueCreate(32, sizeof(MpuMsg));
   gpsQ = xQueueCreate(8, sizeof(GpsMsg));
   eskf.reset();
 
+  ensureWifi();
+
   xTaskCreatePinnedToCore(sensorTask, "sensor", 8192, nullptr, 3, nullptr, 0);
+  xTaskCreatePinnedToCore(uploadTask, "upload", 12288, nullptr, 3, nullptr, 1);
   xTaskCreatePinnedToCore(fusionTxTask, "fusion", 12288, nullptr, 2, nullptr, 1);
 
   Serial.println("[sensor_node] tasks up — cmds: d=diag s=status r=reset");
@@ -489,9 +694,23 @@ void setup() {
 
 void loop() {
   static uint32_t last = 0;
+  static bool led_on = false;
+
+  kppOtaLoop();
+
+  if (!g_wifi_ok) {
+    digitalWrite(PIN_LED, LOW);
+  } else if (g_tx_blink) {
+    g_tx_blink = false;
+    led_on = !led_on;
+    digitalWrite(PIN_LED, led_on ? HIGH : LOW);
+  } else {
+    digitalWrite(PIN_LED, HIGH);
+  }
+
   if (millis() - last >= 1000) {
     last = millis();
-    printDiag();
+    if (WiFi.status() != WL_CONNECTED) ensureWifi();
   }
   while (Serial.available()) {
     const char c = (char)Serial.read();

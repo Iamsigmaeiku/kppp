@@ -351,7 +351,13 @@ function sessionLapViewer(sessionId, transponderId, track) {
         const b = pts[i + 1];
         const aLL = [a.lat, a.lon];
         const bLL = [b.lat, b.lon];
-        latlngs.push(aLL);
+        // 時間差 > 2.0 秒 或 距離 > 40 公尺 → 缺口，不畫弦
+        const dtMs = Date.parse(b.recorded_at) - Date.parse(a.recorded_at);
+        const dlat = (b.lat - a.lat) * 111320;
+        const dlon = (b.lon - a.lon) * 111320 * Math.cos((a.lat + b.lat) * Math.PI / 360);
+        const distM = Math.sqrt(dlat * dlat + dlon * dlon);
+        if (dtMs > 2000 || distM > 40) continue;
+        latlngs.push(aLL, bLL);
         const speeds = [a.speed_mps, b.speed_mps].filter((s) => s != null && !Number.isNaN(s));
         const speed = speeds.length
           ? speeds.reduce((sum, s) => sum + s, 0) / speeds.length
@@ -364,7 +370,6 @@ function sessionLapViewer(sessionId, transponderId, track) {
           lineJoin: 'round',
         }).addTo(this._mapLayer);
       }
-      if (pts.length) latlngs.push([pts[pts.length - 1].lat, pts[pts.length - 1].lon]);
       const fit = () => {
         map.invalidateSize();
         if (latlngs.length) {

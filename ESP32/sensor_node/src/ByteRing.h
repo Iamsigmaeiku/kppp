@@ -40,6 +40,10 @@ class ByteRing {
     return take;
   }
 
+  void clear() {
+    head_ = tail_ = size_ = 0;
+  }
+
   int peek(size_t i) const {
     if (i >= size_) return -1;
     return buf_[(head_ + i) % cap_];

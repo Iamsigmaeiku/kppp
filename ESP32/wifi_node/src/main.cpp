@@ -3,12 +3,14 @@
  * No sensors.
  */
 #include <Arduino.h>
+#include <ArduinoOTA.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include "ByteRing.h"
+#include "KppOta.h"
 #include "packet.h"
 #include "secrets.h"
 
@@ -69,8 +71,10 @@ static size_t ringSize() {
 static void ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     g_wifi_ok = true;
+    kppOtaBegin(OTA_HOSTNAME, OTA_PASSWORD);
     return;
   }
+  kppOtaReset();
   g_wifi_ok = false;
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -82,6 +86,7 @@ static void ensureWifi() {
   g_wifi_ok = (WiFi.status() == WL_CONNECTED);
   if (g_wifi_ok) {
     Serial.printf("[wifi] ok %s\n", WiFi.localIP().toString().c_str());
+    kppOtaBegin(OTA_HOSTNAME, OTA_PASSWORD);
   } else {
     Serial.println("[wifi] connect fail — retry later");
   }
@@ -224,6 +229,8 @@ void loop() {
   static uint32_t last = 0;
   static uint32_t last_imu = 0, last_gps = 0, last_fused = 0, last_mpu = 0;
   static bool led_on = false;
+
+  kppOtaLoop();
 
   if (!g_wifi_ok) {
     digitalWrite(PIN_LED, LOW);

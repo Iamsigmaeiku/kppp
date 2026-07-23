@@ -378,3 +378,48 @@ async def session_lap_tracks_api(
             ]
         }
     )
+
+
+@router.get("/api/sessions/{session_id}/gps-laps")
+async def session_gps_laps_api(request: Request, session_id: str):
+    """GPS 虛擬起跑線分圈（平行於 decoder track-laps，不依賴 decoder）。"""
+    from services.webapp.track_coords import start_gate_latlng
+
+    reader = _get_reader(request)
+    laptime_filter = request.app.state.templates.env.filters["laptime"]
+    try:
+        laps, source = await reader.get_gps_lap_tracks(session_id)
+    except Exception as exc:
+        logger.exception("gps_laps: failed to read from InfluxDB")
+        raise HTTPException(status_code=503, detail="InfluxDB 目前無法連線") from exc
+
+    gate_a, gate_b = start_gate_latlng()
+    # 新→舊：lap_number 大到小
+    ordered = sorted(laps, key=lambda lap: lap.lap_number, reverse=True)
+    return JSONResponse(
+        {
+            "gate": {"a": [gate_a[0], gate_a[1]], "b": [gate_b[0], gate_b[1]]},
+            "source": source,
+            "laps": [
+                {
+                    "lap_number": lap.lap_number,
+                    "lap_time": lap.lap_time,
+                    "lap_time_label": laptime_filter(lap.lap_time),
+                    "started_at": lap.started_at.isoformat(),
+                    "ended_at": lap.ended_at.isoformat(),
+                    "is_complete": lap.is_complete,
+                    "point_count": len(lap.points),
+                    "points": [
+                        {
+                            "lat": point.lat,
+                            "lon": point.lon,
+                            "recorded_at": point.recorded_at.isoformat(),
+                            "speed_mps": point.speed_mps,
+                        }
+                        for point in lap.points
+                    ],
+                }
+                for lap in ordered
+            ],
+        }
+    )

@@ -1,0 +1,9 @@
+�WA���Ұ°�Һ�����ʹ'�E�	u���ʽ��j�U���Ѻ�E���U���*�%��*�%�����٩V�'¬Z���¸��������W¸¬�ɶ'�A�I���W¸¬�A�Vٺ�A��џVٺ�A�i��Vٺ�A�a�ѥ'�q�,�ͫ�嶧*��Ť'�M��A�&���ʱ�!�Ť'�Q���°�ծgڲ�*��Ť'�Q�°¬k��&Ҹa�Kɹ¸¸꥓��WA���Ұ°�Һ�����ʹ'�E�	u���ʽ��j�U���Ѻ�E���U���*�%��*�%�����٩V�'¬Z���¸��������W¸¬�ɶ'�A�I���W¸¬�A�Vٺ�A��џVٺ�A�i��Vٺ�A�a�ѥ'�q�,�ͫ�嶧*��Ť'�M��A�&���ʱ�!�Ť'�Q���°�ծgڲ�*��Ť'�Q�°¬k��&Ҹa�Kɹ¸¸꥓�[sensor_node] boot (ICM+MPU+M10, OTA WiFi)
+[icm] WHO_AM_I=0x47 CS=GPIO5 SPI=10000000Hz
+[icm] FIFO 1kHz ready
+[mpu] ok WHO=0x68 |a|=0.88 SDA=21 SCL=22
+[gps] UART activity @ 38400 baud (rx=47)
+[gps] M10 VALSET: UBX-NAV-PVT @10Hz 115200
+[eskf] calib done n=2002 bg=-0.0112,-0.0196,0.0113
+[mpu] bias ready n=402 bg=-0.0527,0.0291,0.3319
+[eskf] origin lat=22.7416668 lon=120.3220978 fix=3

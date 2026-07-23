@@ -4,6 +4,8 @@
 {% block heading %}遙測數據{% endblock %}
 
 {% block head %}
+<link rel="stylesheet" href="/webapp-static/vendor/leaflet/leaflet.css" />
+<script src="/webapp-static/vendor/leaflet/leaflet.js"></script>
 <style>
   .telemetry-status {
     display: flex;
@@ -48,7 +50,6 @@
   .telemetry-timebar .label {
     color: var(--text-dim);
     font-size: 0.8rem;
-    margin-right: 0.15rem;
   }
   .telemetry-timebar .chip {
     appearance: none;
@@ -56,45 +57,35 @@
     background: var(--panel);
     color: var(--text);
     border-radius: 999px;
-    padding: 0.28rem 0.7rem;
+    padding: 0.25rem 0.7rem;
     font-size: 0.8rem;
     cursor: pointer;
   }
-  .telemetry-timebar .chip:hover { border-color: var(--accent, #5b8def); }
   .telemetry-timebar .chip.active {
-    background: color-mix(in srgb, var(--accent, #5b8def) 22%, var(--panel));
     border-color: var(--accent, #5b8def);
-    color: var(--text);
+    background: color-mix(in srgb, var(--accent, #5b8def) 18%, var(--panel));
   }
   .telemetry-timebar .sep {
     width: 1px;
     height: 1.4rem;
     background: var(--border);
-    margin: 0 0.15rem;
   }
-  .telemetry-timebar input[type="datetime-local"],
   .telemetry-timebar input[type="date"],
+  .telemetry-timebar input[type="datetime-local"],
   .telemetry-timebar select {
     background: var(--panel);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.28rem 0.45rem;
+    border-radius: var(--radius);
+    padding: 0.25rem 0.45rem;
     font-size: 0.8rem;
   }
   .telemetry-timebar .apply-btn {
-    appearance: none;
-    border: 1px solid var(--accent, #5b8def);
-    background: color-mix(in srgb, var(--accent, #5b8def) 18%, var(--panel));
-    color: var(--text);
-    border-radius: 6px;
-    padding: 0.28rem 0.75rem;
     font-size: 0.8rem;
-    cursor: pointer;
   }
   .telemetry-timebar .mode-hint {
     color: var(--text-faint);
-    font-size: 0.75rem;
+    font-size: 0.78rem;
     margin-left: auto;
   }
   .telemetry-frame-wrap {
@@ -115,6 +106,99 @@
     min-height: 960px;
     border: 0;
     background: #0b0f18;
+  }
+
+  /* GPS 分圈 */
+  .gps-lap-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem 1rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+  .gps-lap-toolbar select {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.35rem 0.55rem;
+    font-size: 0.85rem;
+    min-width: 16rem;
+  }
+  .gps-lap-summary {
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    margin-bottom: 0.65rem;
+  }
+  .gps-lap-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 280px;
+    overflow: auto;
+    margin-bottom: 0.75rem;
+  }
+  .gps-lap-row {
+    display: grid;
+    grid-template-columns: 3.2rem 6.5rem 4.5rem 4rem 1fr;
+    gap: 0.5rem;
+    align-items: center;
+    text-align: left;
+    padding: 0.45rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-alt);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .gps-lap-row:hover { border-color: color-mix(in srgb, var(--accent, #5b8def) 50%, var(--border)); }
+  .gps-lap-row.active {
+    border-color: var(--accent, #5b8def);
+    background: color-mix(in srgb, var(--accent, #5b8def) 18%, var(--panel));
+  }
+  .gps-lap-row.incomplete {
+    opacity: 0.55;
+    color: var(--text-dim);
+  }
+  .gps-lap-row .best {
+    color: #73d13d;
+    font-weight: 600;
+  }
+  .gps-lap-row .delta { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .gps-lap-row .tag {
+    font-size: 0.72rem;
+    color: var(--text-faint);
+  }
+  .lap-track-wrap {
+    position: relative;
+    width: min(100%, 720px);
+    aspect-ratio: 1 / 1;
+    margin-top: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: #0a0e14;
+  }
+  .lap-map { width: 100%; height: 100%; }
+  .lap-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+  .lap-speed-legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .lap-speed-legend-bar {
+    width: 72px;
+    height: 8px;
+    border-radius: 2px;
+    background: linear-gradient(to right, #73d13d, #fadb14, #ff4d4f);
   }
 </style>
 {% endblock %}
@@ -206,6 +290,64 @@
     看板內用 <strong>車輛</strong> 下拉選 #1（<code>esp32-kart-01</code> IMU/GPS）或 #2（<code>esp32-kart-02</code> GY-85/MPU/GPS）；
     Fleet 區塊為雙車疊圖。Grafana uid：<code>kart-telemetry</code>。
   </p>
+</div>
+
+<div class="panel" style="padding:1rem 1.1rem 1.15rem; margin-top:1rem;"
+     x-data="gpsLapViewer()"
+     x-init="init()">
+  <div class="panel-header" style="margin-bottom:0.75rem;">GPS 分圈</div>
+  <div class="gps-lap-toolbar">
+    <span class="label" style="color:var(--text-dim);font-size:0.8rem;">場次</span>
+    <select x-model="sessionId" @change="load()">
+      <option value="" disabled>選擇場次…</option>
+      <template x-for="s in sessions" :key="s.session_id">
+        <option :value="s.session_id"
+                x-text="(s.session_number ? ('第' + s.session_number + '節 · ') : '') + s.session_id"></option>
+      </template>
+    </select>
+    <button type="button" class="btn" @click="load()" :disabled="loading || !sessionId">重新載入</button>
+  </div>
+  <template x-if="loading"><p style="color:var(--text-dim);">載入中…</p></template>
+  <template x-if="error && !loading">
+    <p style="color:var(--warn);" x-text="error"></p>
+  </template>
+  <template x-if="!loading && !error && laps.length">
+    <div>
+      <div class="gps-lap-summary" x-text="summaryText()"></div>
+      <div class="gps-lap-list">
+        <template x-for="lap in laps" :key="lap.lap_number">
+          <button type="button"
+                  class="gps-lap-row"
+                  :class="{
+                    active: selectedLap === lap.lap_number,
+                    incomplete: !lap.is_complete
+                  }"
+                  @click="selectedLap = lap.lap_number">
+            <b x-text="'#' + lap.lap_number"></b>
+            <span :class="isBest(lap) ? 'best' : ''" x-text="lap.lap_time_label"></span>
+            <span class="delta" x-text="deltaLabel(lap)"></span>
+            <span x-text="lap.point_count + ' pts'"></span>
+            <span class="tag" x-show="!lap.is_complete">未閉合</span>
+          </button>
+        </template>
+      </div>
+      <div class="lap-meta" x-show="selectedLapData()">
+        <span>圈速：<b x-text="selectedLapData()?.lap_time_label || '—'"></b></span>
+        <span>點數：<b x-text="selectedLapData()?.point_count || 0"></b></span>
+        <span class="lap-speed-legend" title="時速著色 0–72 km/h">
+          <span>慢</span>
+          <span class="lap-speed-legend-bar" aria-hidden="true"></span>
+          <span>快</span>
+        </span>
+      </div>
+      <div class="lap-track-wrap" x-show="selectedLapPoints().length" x-cloak>
+        <div class="lap-map" x-ref="lapMap"></div>
+      </div>
+    </div>
+  </template>
+  <template x-if="!loading && !error && sessionId && !laps.length">
+    <p style="color:var(--text-dim);">此場次沒有 GPS 分圈資料。</p>
+  </template>
 </div>
 <script>
 function telemetryPage() {
@@ -389,6 +531,214 @@ function telemetryPage() {
     init() {
       this.initDefaults();
       this.poll();
+    },
+  };
+}
+
+function gpsLapViewer() {
+  return {
+    sessions: [],
+    sessionId: '',
+    loading: false,
+    error: '',
+    laps: [],
+    selectedLap: null,
+    gate: null,
+    source: '',
+    _map: null,
+    _mapLayer: null,
+    async init() {
+      this.$watch('selectedLap', () => {
+        this.$nextTick(() => this.renderLapMap());
+      });
+      this.$watch('loading', (v) => {
+        if (!v) this.$nextTick(() => this.renderLapMap());
+      });
+      await this.loadSessions();
+    },
+    async loadSessions() {
+      try {
+        const res = await fetch('/api/sessions');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        this.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+        if (!this.sessionId && this.sessions.length) {
+          this.sessionId = this.sessions[0].session_id;
+          await this.load();
+        }
+      } catch (err) {
+        this.error = `載入場次失敗：${err?.message || err}`;
+      }
+    },
+    async load() {
+      if (!this.sessionId) return;
+      this.loading = true;
+      this.error = '';
+      try {
+        const res = await fetch(`/api/sessions/${this.sessionId}/gps-laps`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        this.laps = Array.isArray(data.laps) ? data.laps : [];
+        this.gate = data.gate || null;
+        this.source = data.source || '';
+        const firstWithPoints = this.laps.find((lap) => Array.isArray(lap.points) && lap.points.length);
+        this.selectedLap = firstWithPoints?.lap_number ?? this.laps[0]?.lap_number ?? null;
+      } catch (err) {
+        this.error = `載入 GPS 分圈失敗：${err?.message || err}`;
+        this.laps = [];
+      } finally {
+        this.loading = false;
+      }
+    },
+    completeLaps() {
+      return this.laps.filter((lap) => lap.is_complete);
+    },
+    bestLapTime() {
+      const times = this.completeLaps().map((lap) => lap.lap_time).filter((t) => t != null);
+      return times.length ? Math.min(...times) : null;
+    },
+    isBest(lap) {
+      const best = this.bestLapTime();
+      return !!(lap.is_complete && best != null && Math.abs(lap.lap_time - best) < 1e-6);
+    },
+    deltaLabel(lap) {
+      if (!lap.is_complete) return '—';
+      const best = this.bestLapTime();
+      if (best == null) return '—';
+      const d = lap.lap_time - best;
+      if (Math.abs(d) < 1e-6) return 'best';
+      return (d >= 0 ? '+' : '') + d.toFixed(3);
+    },
+    summaryText() {
+      const n = this.laps.length;
+      const m = this.completeLaps().length;
+      const best = this.bestLapTime();
+      const bestLabel = best == null ? '—' : (
+        this.completeLaps().find((lap) => Math.abs(lap.lap_time - best) < 1e-6)?.lap_time_label || best.toFixed(3) + 's'
+      );
+      return `共 ${n} 圈（有效 ${m}）· 最佳 ${bestLabel} · 來源 ${this.source || '—'}`;
+    },
+    selectedLapData() {
+      return this.laps.find((lap) => lap.lap_number === this.selectedLap) || null;
+    },
+    selectedLapPoints() {
+      return this.selectedLapData()?.points || [];
+    },
+    speedToColor(speedMps) {
+      if (speedMps == null || Number.isNaN(speedMps)) return '#60a5fa';
+      const t = Math.max(0, Math.min(1, speedMps / 20));
+      const stops = [
+        [0.0, [115, 209, 61]],
+        [0.5, [250, 219, 20]],
+        [1.0, [255, 77, 79]],
+      ];
+      let lo = stops[0], hi = stops[stops.length - 1];
+      for (let i = 0; i < stops.length - 1; i++) {
+        if (t >= stops[i][0] && t <= stops[i + 1][0]) {
+          lo = stops[i];
+          hi = stops[i + 1];
+          break;
+        }
+      }
+      const u = (t - lo[0]) / (hi[0] - lo[0] || 1);
+      const r = Math.round(lo[1][0] + (hi[1][0] - lo[1][0]) * u);
+      const g = Math.round(lo[1][1] + (hi[1][1] - lo[1][1]) * u);
+      const b = Math.round(lo[1][2] + (hi[1][2] - lo[1][2]) * u);
+      return `rgb(${r},${g},${b})`;
+    },
+    ensureMap() {
+      const el = this.$refs.lapMap;
+      if (!el || typeof L === 'undefined') return null;
+      if (this._map) return this._map;
+      this._map = L.map(el, {
+        zoomControl: true,
+        attributionControl: true,
+      });
+      L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+        maxZoom: 22,
+        attribution: '&copy; Google',
+      }).addTo(this._map);
+      this._mapLayer = L.layerGroup().addTo(this._map);
+      return this._map;
+    },
+    renderLapMap() {
+      const pts = this.selectedLapPoints();
+      if (!pts.length) return;
+      const map = this.ensureMap();
+      if (!map || !this._mapLayer) return;
+      this._mapLayer.clearLayers();
+      const latlngs = [];
+
+      // 起跑線：白色粗線 + 深色描邊，方便對切點
+      if (this.gate?.a && this.gate?.b) {
+        const gateLL = [this.gate.a, this.gate.b];
+        L.polyline(gateLL, {
+          color: '#111',
+          weight: 7,
+          opacity: 0.55,
+          lineCap: 'round',
+        }).addTo(this._mapLayer);
+        L.polyline(gateLL, {
+          color: '#fff',
+          weight: 4,
+          opacity: 0.95,
+          lineCap: 'round',
+        }).addTo(this._mapLayer);
+        latlngs.push(this.gate.a, this.gate.b);
+      }
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const aLL = [a.lat, a.lon];
+        const bLL = [b.lat, b.lon];
+        const dtMs = Date.parse(b.recorded_at) - Date.parse(a.recorded_at);
+        const dlat = (b.lat - a.lat) * 111320;
+        const dlon = (b.lon - a.lon) * 111320 * Math.cos((a.lat + b.lat) * Math.PI / 360);
+        const distM = Math.sqrt(dlat * dlat + dlon * dlon);
+        if (dtMs > 2000 || distM > 40) continue;
+        latlngs.push(aLL, bLL);
+        const speeds = [a.speed_mps, b.speed_mps].filter((s) => s != null && !Number.isNaN(s));
+        const speed = speeds.length
+          ? speeds.reduce((sum, s) => sum + s, 0) / speeds.length
+          : null;
+        L.polyline([aLL, bLL], {
+          color: this.speedToColor(speed),
+          weight: 4,
+          opacity: 0.95,
+          lineCap: 'round',
+          lineJoin: 'round',
+        }).addTo(this._mapLayer);
+      }
+
+      // 首尾 marker：切得好應該重疊在起跑線上
+      const start = pts[0];
+      const end = pts[pts.length - 1];
+      L.circleMarker([start.lat, start.lon], {
+        radius: 6,
+        color: '#0a0',
+        weight: 2,
+        fillColor: '#73d13d',
+        fillOpacity: 1,
+      }).addTo(this._mapLayer);
+      L.circleMarker([end.lat, end.lon], {
+        radius: 6,
+        color: '#600',
+        weight: 2,
+        fillColor: '#ff4d4f',
+        fillOpacity: 1,
+      }).addTo(this._mapLayer);
+
+      const fit = () => {
+        map.invalidateSize();
+        if (latlngs.length) {
+          map.fitBounds(latlngs, { padding: [24, 24], maxZoom: 20 });
+        }
+      };
+      this.$nextTick(() => {
+        fit();
+        setTimeout(fit, 80);
+      });
     },
   };
 }
