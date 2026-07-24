@@ -38,7 +38,9 @@ static constexpr int PIN_LED = 2;
 static constexpr uint32_t SENSOR_PERIOD_US = 5000;  // 200 Hz
 static constexpr uint32_t FUSED_PERIOD_US = 20000;  // 50 Hz
 
-static constexpr size_t kUploadRingCap = 20480;
+// 雙 ring：GPS 永不被 IMU 擠掉；滿了只清 imuRing
+static constexpr size_t kGpsRingCap = 12288;   // ~10Hz×20s GPS frames
+static constexpr size_t kImuRingCap = 16384;
 static constexpr size_t kBatchMtu = 1400;
 static constexpr uint32_t kFlushMs = 20;
 
@@ -69,8 +71,10 @@ static WiFiClientSecure tls;
 static WiFiUDP udp;
 #endif
 
-static uint8_t uploadRingStorage[kUploadRingCap];
-static ByteRing uploadRing(uploadRingStorage, kUploadRingCap);
+static uint8_t gpsRingStorage[kGpsRingCap];
+static uint8_t imuRingStorage[kImuRingCap];
+static ByteRing gpsRing(gpsRingStorage, kGpsRingCap);
+static ByteRing imuRing(imuRingStorage, kImuRingCap);
 static portMUX_TYPE uploadMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct ImuMsg {
@@ -92,12 +96,16 @@ static QueueHandle_t gpsQ = nullptr;
 static volatile uint32_t g_tx_imu = 0, g_tx_mpu = 0, g_tx_gps = 0, g_tx_fused = 0;
 static volatile uint8_t g_last_gps_fix = 0, g_last_gps_sv = 0;
 static volatile uint32_t g_drop_imu = 0, g_drop_mpu = 0, g_ring_drop = 0;
+static volatile uint32_t g_gps_ring_drop = 0;  // 僅 gpsRing 真的滿到不得不丟最舊 GPS
 static volatile uint32_t g_up_bytes = 0, g_up_fail = 0;
 static volatile int g_last_http_code = 0;
 static volatile bool g_imu_fault = false;
 static volatile bool g_mpu_ok = false;
+static volatile bool g_icm_ok = false;
 static volatile bool g_wifi_ok = false;
 static volatile bool g_tx_blink = false;
+static volatile uint32_t g_icm_reinit_n = 0;
+static volatile uint32_t g_last_icm_sample_us = 0;
 
 // MPU static bias from 2 s window (parallel to ESKF calib)
 static float g_mpu_bg[3] = {0, 0, 0};
@@ -110,54 +118,108 @@ static uint32_t g_mpu_bias_t0 = 0;
 
 static size_t ringSize() {
   portENTER_CRITICAL(&uploadMux);
-  const size_t s = uploadRing.size();
+  const size_t s = gpsRing.size() + imuRing.size();
   portEXIT_CRITICAL(&uploadMux);
   return s;
 }
 
-static void ringWrite(const uint8_t *data, size_t n) {
+/** 從 ring head 丟掉一個完整 frame；失敗（無 sync）丟 1 byte。回傳丟掉的 bytes。 */
+static size_t dropOneFrameUnlocked(ByteRing &ring) {
+  if (ring.empty()) return 0;
+  // resync
+  while (ring.size() >= 2) {
+    const int b0 = ring.peek(0);
+    const int b1 = ring.peek(1);
+    if (b0 == (int)KPP_SYNC0 && b1 == (int)KPP_SYNC1) break;
+    uint8_t dump;
+    ring.read(&dump, 1);
+  }
+  if (ring.size() < 4) {
+    const size_t n = ring.size();
+    ring.clear();
+    return n;
+  }
+  const int len = ring.peek(3);
+  if (len < 0) return 0;
+  const size_t frame_n = 4u + (size_t)len + 2u;
+  if (frame_n > ring.size()) {
+    // 殘缺 frame：丟掉到能重新 sync
+    uint8_t dump;
+    ring.read(&dump, 1);
+    return 1;
+  }
+  uint8_t tmp[KPP_MAX_FRAME];
+  return ring.read(tmp, frame_n);
+}
+
+static void ringWriteGps(const uint8_t *data, size_t n) {
   portENTER_CRITICAL(&uploadMux);
-  if (n > kUploadRingCap) {
+  if (n > kGpsRingCap) {
     portEXIT_CRITICAL(&uploadMux);
     return;
   }
-  if (uploadRing.free() < n) {
-    // byte-drop 會切斷 frame → server 解不出；寧可清空舊資料
-    uploadRing.clear();
-    g_ring_drop++;
+  // GPS 優先：只在 gpsRing 真滿時丟最舊 GPS frame（不碰 imuRing、不清整環）
+  while (gpsRing.free() < n) {
+    if (dropOneFrameUnlocked(gpsRing) == 0) {
+      gpsRing.clear();
+      break;
+    }
+    g_gps_ring_drop++;
   }
-  uploadRing.write(data, n);
+  gpsRing.write(data, n);
   portEXIT_CRITICAL(&uploadMux);
 }
 
-static size_t ringRead(uint8_t *out, size_t n) {
+static void ringWriteImu(const uint8_t *data, size_t n) {
   portENTER_CRITICAL(&uploadMux);
-  const size_t got = uploadRing.read(out, n);
+  if (n > kImuRingCap) {
+    portEXIT_CRITICAL(&uploadMux);
+    return;
+  }
+  // 滿了只清 IMU ring，絕不連坐 GPS
+  if (imuRing.free() < n) {
+    imuRing.clear();
+    g_ring_drop++;
+  }
+  imuRing.write(data, n);
   portEXIT_CRITICAL(&uploadMux);
-  return got;
 }
 
 static bool enqueueFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
 #if TELEMETRY_USE_HTTP
-  // HTTPS 吞吐有限：地圖靠 GPS + fused，不送 raw IMU
-  if (type == KPP_TYPE_IMU || type == KPP_TYPE_MPU) {
-    return false;
-  }
-  if (type == KPP_TYPE_FUSED) {
+  // HTTPS 仍需抽樣；UDP 全送。GPS 永不抽樣。
+  if (type == KPP_TYPE_IMU) {
+    static uint8_t icm_skip = 0;
+    if (++icm_skip < 8) return false;  // ~1/8（原 1/20）
+    icm_skip = 0;
+  } else if (type == KPP_TYPE_MPU) {
+    static uint8_t mpu_skip = 0;
+    if (++mpu_skip < 5) return false;  // ~1/5（原 1/10）
+    mpu_skip = 0;
+  } else if (type == KPP_TYPE_FUSED) {
     static uint8_t fused_skip = 0;
-    if (++fused_skip < 5) return false;  // 50 Hz → 10 Hz 上傳
+    if (++fused_skip < 2) return false;  // 50→25 Hz
     fused_skip = 0;
   }
 #endif
-  if (ringSize() > (kUploadRingCap * 3 / 4) &&
-      (type == KPP_TYPE_IMU || type == KPP_TYPE_MPU)) {
-    return false;
+  // IMU ring 將滿：拒 IMU/MPU/FUSED/DBG，GPS 走獨立 ring 不受影響
+  if (type != KPP_TYPE_GPS) {
+    portENTER_CRITICAL(&uploadMux);
+    const bool imu_hot = imuRing.size() > (kImuRingCap * 3 / 4);
+    portEXIT_CRITICAL(&uploadMux);
+    if (imu_hot && (type == KPP_TYPE_IMU || type == KPP_TYPE_MPU)) {
+      return false;
+    }
   }
 
   uint8_t frame[KPP_MAX_FRAME];
   const size_t n = kpp_frame_encode(type, payload, len, frame, sizeof(frame));
   if (!n) return false;
-  ringWrite(frame, n);
+  if (type == KPP_TYPE_GPS) {
+    ringWriteGps(frame, n);
+  } else {
+    ringWriteImu(frame, n);
+  }
   return true;
 }
 
@@ -223,6 +285,13 @@ static void sensorTask(void *) {
 
   IcmFifoSample batch[KPP_IMU_MAX_SAMPLES];
   uint32_t next = micros();
+  uint32_t last_icm_watch = micros();
+  uint32_t last_icm_reinit_try = 0;
+  // 無有效 FIFO 樣本多久 → 當 ICM 死（線鬆 / SPI 掛）
+  constexpr uint32_t kIcmStallUs = 500000u;       // 0.5 s
+  constexpr uint32_t kIcmReinitPeriodUs = 2000000u;  // 2 s 重試
+  constexpr uint32_t kIcmWhoamiPeriodUs = 1000000u;  // 1 s 巡檢
+
   for (;;) {
     const uint32_t now = micros();
     if ((int32_t)(now - next) < 0) {
@@ -234,15 +303,53 @@ static void sensorTask(void *) {
       next = now + SENSOR_PERIOD_US;
     }
 
-    const size_t n = icm.readFifo(batch, KPP_IMU_MAX_SAMPLES);
-    for (size_t i = 0; i < n; i++) {
-      ImuMsg m{};
-      m.s = batch[i];
-      if (xQueueSend(imuQ, &m, 0) != pdTRUE) {
-        ImuMsg dump;
-        xQueueReceive(imuQ, &dump, 0);
-        xQueueSend(imuQ, &m, 0);
-        g_drop_imu++;
+    if (g_icm_ok) {
+      const size_t n = icm.readFifo(batch, KPP_IMU_MAX_SAMPLES);
+      for (size_t i = 0; i < n; i++) {
+        ImuMsg m{};
+        m.s = batch[i];
+        if (xQueueSend(imuQ, &m, 0) != pdTRUE) {
+          ImuMsg dump;
+          xQueueReceive(imuQ, &dump, 0);
+          xQueueSend(imuQ, &m, 0);
+          g_drop_imu++;
+        }
+      }
+      if (n > 0) {
+        g_last_icm_sample_us = now;
+      }
+
+      // 巡檢 WHOAMI / stall → 標死，下一輪 reinit
+      if ((now - last_icm_watch) >= kIcmWhoamiPeriodUs) {
+        last_icm_watch = now;
+        const bool stalled =
+            (g_last_icm_sample_us != 0) &&
+            ((now - g_last_icm_sample_us) > kIcmStallUs);
+        if (stalled || !icm.whoamiOk()) {
+          g_icm_ok = false;
+          g_imu_fault = true;
+          Serial.printf(
+              "[icm] DEAD stall=%d whoami=%d — will reinit\n", (int)stalled,
+              (int)icm.whoamiOk());
+        }
+      }
+    } else {
+      // 復活路徑：週期 soft-reset + begin
+      if ((now - last_icm_reinit_try) >= kIcmReinitPeriodUs) {
+        last_icm_reinit_try = now;
+        Serial.println("[icm] reinit…");
+        if (icm.begin()) {
+          g_icm_ok = true;
+          g_last_icm_sample_us = now;
+          g_icm_reinit_n++;
+          // 清掉可能殘留的舊 ICM queue
+          ImuMsg dump;
+          while (xQueueReceive(imuQ, &dump, 0) == pdTRUE) {
+          }
+          Serial.printf("[icm] REVIVED n=%u\n", (unsigned)g_icm_reinit_n);
+        } else {
+          Serial.println("[icm] reinit FAIL");
+        }
       }
     }
 
@@ -347,6 +454,20 @@ static void fusionTxTask(void *) {
       }
       have_mpu = true;
 
+      // ICM 死掉時用 MPU 餵 ESKF，避免融合整段停擺
+      if (!g_icm_ok) {
+        EskfImuIn in{};
+        in.ts_us = mm.s.ts_us;
+        in.ax_g = mpu_ax;
+        in.ay_g = mpu_ay;
+        in.az_g = mpu_az;
+        in.gx_rps = mpu_gx;
+        in.gy_rps = mpu_gy;
+        in.gz_rps = mpu_gz;
+        eskf.onImu(in);
+        g_imu_fault = true;
+      }
+
       if (mpu_acc_n < KPP_IMU_MAX_SAMPLES) {
         KppImuSample &s = mpu_acc[mpu_acc_n++];
         s.ts_us = mm.s.ts_us;
@@ -359,9 +480,8 @@ static void fusionTxTask(void *) {
         s.temp = mm.s.temp;
       }
       if (mpu_acc_n >= KPP_IMU_MAX_SAMPLES) {
-#if !TELEMETRY_USE_HTTP
+        // 只走 0x04；禁止把 MPU 鏡成 0x01（ICM 掛了就讓 ax 缺，不要造假）
         enqueueImuBatch(KPP_TYPE_MPU, mpu_acc, mpu_acc_n, g_tx_mpu);
-#endif
         mpu_acc_n = 0;
         last_mpu_flush = micros();
       }
@@ -429,9 +549,7 @@ static void fusionTxTask(void *) {
         s.temp = im.s.temp;
       }
       if (icm_acc_n >= KPP_IMU_MAX_SAMPLES) {
-#if !TELEMETRY_USE_HTTP
         enqueueImuBatch(KPP_TYPE_IMU, icm_acc, icm_acc_n, g_tx_imu);
-#endif
         icm_acc_n = 0;
         last_icm_flush = micros();
       }
@@ -439,16 +557,12 @@ static void fusionTxTask(void *) {
 
     const uint32_t now = micros();
     if (icm_acc_n > 0 && (now - last_icm_flush) > 10000u) {
-#if !TELEMETRY_USE_HTTP
       enqueueImuBatch(KPP_TYPE_IMU, icm_acc, icm_acc_n, g_tx_imu);
-#endif
       icm_acc_n = 0;
       last_icm_flush = now;
     }
     if (mpu_acc_n > 0 && (now - last_mpu_flush) > 10000u) {
-#if !TELEMETRY_USE_HTTP
       enqueueImuBatch(KPP_TYPE_MPU, mpu_acc, mpu_acc_n, g_tx_mpu);
-#endif
       mpu_acc_n = 0;
       last_mpu_flush = now;
     }
@@ -549,14 +663,21 @@ static void uploadTask(void *) {
 
     while (batch_n < kBatchMtu) {
       const size_t room = kBatchMtu - batch_n;
-      const size_t got = ringRead(batch + batch_n, room);
+      size_t got = 0;
+      portENTER_CRITICAL(&uploadMux);
+      // GPS 優先 drain
+      got = gpsRing.read(batch + batch_n, room);
+      if (got == 0) {
+        got = imuRing.read(batch + batch_n, room);
+      }
+      portEXIT_CRITICAL(&uploadMux);
       if (got == 0) break;
       batch_n += got;
     }
 
     const uint32_t now = millis();
     const uint32_t flush_ms =
-        ringSize() > (kUploadRingCap / 2) ? 10u : kFlushMs;
+        ringSize() > ((kGpsRingCap + kImuRingCap) / 2) ? 10u : kFlushMs;
     const bool full = batch_n >= kBatchMtu;
     const bool timed = batch_n > 0 && (now - last_flush) >= flush_ms;
     if (full || timed) {
@@ -592,12 +713,12 @@ static void uploadTask(void *) {
         }
 #endif
         if (fail_streak >= 3) {
-          // 避免 dead batch 卡死 ring
+          // 丟棄卡住的 batch；只清 IMU ring，GPS ring 保留
           batch_n = 0;
           fail_streak = 0;
           portENTER_CRITICAL(&uploadMux);
-          if (uploadRing.size() > (kUploadRingCap * 3 / 4)) {
-            uploadRing.clear();
+          if (imuRing.size() > (kImuRingCap * 3 / 4)) {
+            imuRing.clear();
             g_ring_drop++;
           }
           portEXIT_CRITICAL(&uploadMux);
@@ -637,12 +758,15 @@ static void printDiag() {
       o.pos_std_m, o.innov_pos_m, o.innov_vel_mps, o.bg[0], o.bg[1], o.bg[2],
       (unsigned)o.zupt_count);
   Serial.printf(
-      "[tx] icm=%u mpu=%u gps=%u fused=%u drop_i=%u drop_m=%u ring_ovf=%u "
-      "ring=%u up_B=%u up_fail=%u http=%d wifi=%d\n",
+      "[tx] icm=%u mpu=%u gps=%u fused=%u drop_i=%u drop_m=%u imu_ovf=%u "
+      "gps_ovf=%u ring_g=%u ring_i=%u up_B=%u up_fail=%u http=%d wifi=%d "
+      "icm_ok=%d reinit=%u\n",
       (unsigned)g_tx_imu, (unsigned)g_tx_mpu, (unsigned)g_tx_gps,
       (unsigned)g_tx_fused, (unsigned)g_drop_imu, (unsigned)g_drop_mpu,
-      (unsigned)g_ring_drop, (unsigned)ringSize(), (unsigned)g_up_bytes,
-      (unsigned)g_up_fail, g_last_http_code, (int)g_wifi_ok);
+      (unsigned)g_ring_drop, (unsigned)g_gps_ring_drop,
+      (unsigned)gpsRing.size(), (unsigned)imuRing.size(), (unsigned)g_up_bytes,
+      (unsigned)g_up_fail, g_last_http_code, (int)g_wifi_ok, (int)g_icm_ok,
+      (unsigned)g_icm_reinit_n);
   const uint32_t gps_rx_bytes = gps.takeRxBytes();
   KppDbgPayload db{};
   db.gps_rx_bps = (uint16_t)(gps_rx_bytes > 65535 ? 65535 : gps_rx_bytes);
@@ -652,6 +776,7 @@ static void printDiag() {
   enqueueFrame(KPP_TYPE_DBG, (const uint8_t *)&db, sizeof(db));
   g_tx_imu = g_tx_mpu = g_tx_gps = g_tx_fused = 0;
   g_drop_imu = g_drop_mpu = g_ring_drop = 0;
+  g_gps_ring_drop = 0;
   g_up_bytes = 0;
   g_up_fail = 0;
 }
@@ -669,12 +794,18 @@ void setup() {
                 DEVICE_ID);
 #endif
 
-  if (!icm.begin()) {
-    Serial.println("[sensor_node] ICM init FAIL");
+  g_icm_ok = icm.begin();
+  if (!g_icm_ok) {
+    Serial.println("[sensor_node] ICM init FAIL — 會持續 reinit；暫用 MPU→ESKF");
+  } else {
+    g_last_icm_sample_us = micros();
   }
   g_mpu_ok = mpu.begin();
   if (!g_mpu_ok) {
     Serial.println("[sensor_node] MPU init FAIL — continuing ICM-only");
+  }
+  if (!g_icm_ok && !g_mpu_ok) {
+    Serial.println("[sensor_node] FATAL: no IMU available");
   }
   gps.configure(PIN_GPS_RX, PIN_GPS_TX);
 

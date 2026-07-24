@@ -39,6 +39,80 @@ def _parse_xy(text: str) -> tuple[float, float]:
     return float(parts[0]), float(parts[1])
 
 
+def _print_gate_diagnostics(
+    points,
+    gate_a_m: tuple[float, float],
+    gate_b_m: tuple[float, float],
+    forward_bearing_deg: float,
+) -> None:
+    """過線前後 dt 分佈 + 異號但橫向出界（漏切候選）。"""
+    from services.decoder_ingest.gps_lap_splitter import (
+        MAX_GAP_SEC,
+        _along_offset,
+        _forward_normal,
+        _gate_frame,
+        _signed_across,
+        _zero_cross_s,
+    )
+    from services.webapp.track_coords import latlng_to_local_m
+
+    if len(points) < 2:
+        print("\ndiagnostics: <2 points, skip")
+        return
+
+    locals_m = [latlng_to_local_m(p.lat, p.lon) for p in points]
+    center, along, across, half_len = _gate_frame(gate_a_m, gate_b_m)
+    forward_n = _forward_normal(forward_bearing_deg)
+
+    near_dts: list[float] = []
+    miss_lateral = 0
+    miss_gap = 0
+    accepted_raw = 0
+    for i in range(len(points) - 1):
+        m1, m2 = locals_m[i], locals_m[i + 1]
+        dt = (points[i + 1].recorded_at - points[i].recorded_at).total_seconds()
+        if dt < 0:
+            continue
+        d1 = _signed_across(m1, center, across)
+        d2 = _signed_across(m2, center, across)
+        s = _zero_cross_s(d1, d2)
+        if s is None:
+            continue
+        move = (m2[0] - m1[0], m2[1] - m1[1])
+        if move[0] * forward_n[0] + move[1] * forward_n[1] <= 0:
+            continue
+        x_m = m1[0] + (m2[0] - m1[0]) * s
+        y_m = m1[1] + (m2[1] - m1[1]) * s
+        lateral = abs(_along_offset((x_m, y_m), center, along))
+        # 過線附近的弦：交點在半寬*1.5 內都算「靠近 gate」
+        if lateral <= half_len * 1.5:
+            near_dts.append(dt)
+        if lateral > half_len:
+            miss_lateral += 1
+            continue
+        if dt > MAX_GAP_SEC:
+            miss_gap += 1
+            continue
+        accepted_raw += 1
+
+    print("\n--- gate diagnostics ---")
+    print(f"half_len={half_len:.2f}m  MAX_GAP={MAX_GAP_SEC}s")
+    print(f"raw_forward_crossings_in_half={accepted_raw}")
+    print(f"miss_candidates lateral_oob={miss_lateral}  gap_skip={miss_gap}")
+    if near_dts:
+        near_dts.sort()
+        p50 = near_dts[len(near_dts) // 2]
+        print(
+            f"near-gate segment dt: n={len(near_dts)}  "
+            f"min={near_dts[0]:.3f}s  p50={p50:.3f}s  max={near_dts[-1]:.3f}s"
+        )
+        over5 = sum(1 for d in near_dts if d > 5.0)
+        over15 = sum(1 for d in near_dts if d > MAX_GAP_SEC)
+        print(f"near-gate dt>5s={over5}  dt>MAX_GAP={over15}")
+    else:
+        print("near-gate segment dt: none")
+
+
 def _build_overlay(
     *,
     track_png: Path,
@@ -137,7 +211,7 @@ async def _run(args: argparse.Namespace) -> int:
         gate_a_m = START_GATE_A_M
         gate_b_m = START_GATE_B_M
         bearing = GATE_FORWARD_BEARING_DEG
-        print(f"使用 track_coords placeholder gate A={gate_a_m} B={gate_b_m} bearing={bearing}")
+        print(f"使用 track_coords gate A={gate_a_m} B={gate_b_m} bearing={bearing}")
 
     # 示範幾個參考像素換算，方便在圖上對白線
     for label, px in (("center", (640.0, 640.0)), ("sample", (900.0, 700.0))):
@@ -156,6 +230,8 @@ async def _run(args: argparse.Namespace) -> int:
         gate_b_px=gate_b_px,
     )
     print(f"overlay → {out_png}")
+
+    _print_gate_diagnostics(points, gate_a_m, gate_b_m, bearing)
 
     gps_laps = split_laps_by_gate(points, gate_a_m, gate_b_m, bearing)
     complete = [lap for lap in gps_laps if lap.is_complete]
@@ -187,8 +263,8 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"{i+1:>4}  {g:10.3f}  {d:10.3f}  {g - d:+8.3f}")
         if len(complete) != len(dec):
             print(
-                f"⚠️ 圈數不一致：GPS complete={len(complete)} vs decoder={len(dec)} "
-                "（先確認 gate / bearing）"
+                f"WARN: lap count mismatch: GPS complete={len(complete)} vs decoder={len(dec)} "
+                "(check gate / bearing)"
             )
         else:
             diffs = [abs(complete[i].lap_time - dec[i].lap_time) for i in range(n)]

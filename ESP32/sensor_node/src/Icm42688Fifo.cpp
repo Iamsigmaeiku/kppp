@@ -60,15 +60,40 @@ bool Icm42688Fifo::writeRetry(uint8_t reg, uint8_t val, int tries) {
 }
 
 bool Icm42688Fifo::probe() {
-  uint8_t who = 0;
-  if (!readRegs(kWhoAmIReg, &who, 1)) return false;
-  if (who != kWhoAmIVal) {
-    Serial.printf("[icm] WHO_AM_I=0x%02X want 0x%02X\n", who, kWhoAmIVal);
-    return false;
+  // 先慢速探，WHO=0x00 常見於上電未穩 / 線鬆
+  const uint32_t speeds[] = {1000000u, 4000000u, ICM_SPI_HZ};
+  for (uint32_t hz : speeds) {
+    for (int attempt = 0; attempt < 3; attempt++) {
+      uint8_t who = 0;
+      spiBus()->beginTransaction(SPISettings(hz, MSBFIRST, SPI_MODE0));
+      digitalWrite(ICM_SPI_CS, LOW);
+      spiBus()->transfer(kWhoAmIReg | 0x80);
+      who = spiBus()->transfer(0x00);
+      digitalWrite(ICM_SPI_CS, HIGH);
+      spiBus()->endTransaction();
+      if (who == kWhoAmIVal) {
+        Serial.printf("[icm] WHO_AM_I=0x%02X CS=GPIO%d SPI=%luHz\n", who,
+                      ICM_SPI_CS, (unsigned long)hz);
+        return true;
+      }
+      Serial.printf("[icm] WHO_AM_I=0x%02X want 0x%02X (hz=%lu try=%d)\n", who,
+                    kWhoAmIVal, (unsigned long)hz, attempt + 1);
+      delay(20);
+    }
   }
-  Serial.printf("[icm] WHO_AM_I=0x%02X CS=GPIO%d SPI=%luHz\n", who, ICM_SPI_CS,
-                (unsigned long)ICM_SPI_HZ);
-  return true;
+  return false;
+}
+
+bool Icm42688Fifo::whoamiOk() {
+  uint8_t who = 0;
+  // 健康檢查用低速，避開線鬆時高速讀到假陽性
+  spiBus()->beginTransaction(SPISettings(1000000u, MSBFIRST, SPI_MODE0));
+  digitalWrite(ICM_SPI_CS, LOW);
+  spiBus()->transfer(kWhoAmIReg | 0x80);
+  who = spiBus()->transfer(0x00);
+  digitalWrite(ICM_SPI_CS, HIGH);
+  spiBus()->endTransaction();
+  return who == kWhoAmIVal;
 }
 
 uint16_t Icm42688Fifo::fifoCount() {
@@ -80,12 +105,12 @@ uint16_t Icm42688Fifo::fifoCount() {
 bool Icm42688Fifo::begin() {
   pinMode(ICM_SPI_CS, OUTPUT);
   digitalWrite(ICM_SPI_CS, HIGH);
-  spiBus()->begin(ICM_SPI_SCK, ICM_SPI_MISO, ICM_SPI_MOSI, ICM_SPI_CS);
-  delay(10);
-
-  // soft reset
-  writeReg(kDeviceConfig, 0x01);
+  spiBus()->begin(ICM_SPI_SCK, ICM_SPI_MISO, ICM_SPI_MOSI, -1);
   delay(50);
+
+  // soft reset（失敗也不中止，後面 probe 會判）
+  writeReg(kDeviceConfig, 0x01);
+  delay(80);
 
   if (!probe()) return false;
 
@@ -109,7 +134,9 @@ bool Icm42688Fifo::begin() {
   // flush any junk
   const uint16_t n = fifoCount();
   uint8_t junk[16];
-  for (uint16_t i = 0; i + kPktSize <= n; i += (uint16_t)kPktSize) {
+  // 防 SPI 浮接回 0xFFFF 時死循環
+  const uint16_t n_flush = (n > 2048) ? 2048 : n;
+  for (uint16_t i = 0; i + kPktSize <= n_flush; i += (uint16_t)kPktSize) {
     readRegs(kFifoData, junk, kPktSize);
   }
 
@@ -120,6 +147,10 @@ bool Icm42688Fifo::begin() {
 size_t Icm42688Fifo::readFifo(IcmFifoSample *out, size_t max_n) {
   if (!out || max_n == 0) return 0;
   uint16_t bytes = fifoCount();
+  // 線鬆時常讀到 0xFFFF；當異常捨棄本輪
+  if (bytes > 2048) {
+    return 0;
+  }
   size_t got = 0;
   const uint32_t t_batch = micros();
   while (bytes >= kPktSize && got < max_n) {
@@ -127,14 +158,14 @@ size_t Icm42688Fifo::readFifo(IcmFifoSample *out, size_t max_n) {
     if (!readRegs(kFifoData, pkt, kPktSize)) break;
     bytes = (bytes >= kPktSize) ? (uint16_t)(bytes - kPktSize) : 0;
 
-    // Header bit0=accel, bit1=gyro; skip empty/invalid
+    // ICM-42688 FIFO header bit7=HEADER_MSG（空包）；其餘內容位各版本文檔不一致，
+    // 只丟空包 + bus 垃圾，避免誤殺導致「永遠無樣本→狂 reinit」。
     const uint8_t hdr = pkt[0];
-    if ((hdr & 0x80) == 0 && (hdr & 0x40) == 0) {
-      // some revisions: empty marker
+    if ((hdr & 0x80) != 0) {
+      continue;
     }
+
     IcmFifoSample &s = out[got];
-    s.ts_us = t_batch - (uint32_t)((max_n - got) * 1000u);  // approx 1ms spacing backward
-    // Prefer sequential: assign later in caller; here use batch time + index
     s.ts_us = t_batch + (uint32_t)(got * 1000u);
     s.ax = be16(&pkt[1]);
     s.ay = be16(&pkt[3]);
@@ -144,6 +175,11 @@ size_t Icm42688Fifo::readFifo(IcmFifoSample *out, size_t max_n) {
     s.gz = be16(&pkt[11]);
     // temp is int8 in FIFO byte 13 on ICM42688; extend
     s.temp = (int16_t)(int8_t)pkt[13];
+    // 全 0xFF → 典型 SPI 浮接
+    if (s.ax == -1 && s.ay == -1 && s.az == -1 && s.gx == -1 && s.gy == -1 &&
+        s.gz == -1) {
+      continue;
+    }
     s.ok = true;
     got++;
   }

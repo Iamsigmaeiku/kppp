@@ -22,7 +22,7 @@ from services.decoder_ingest.influx_reader import InfluxReader
 from . import session_numbering
 from .avatars import avatar_url_for
 from .deps import get_current_user, get_db
-from .models import CarBinding, RaceSession, User, public_display_name
+from .models import CarBinding, RaceSession, TimebaseCalibration, User, public_display_name
 from .template_ctx import template_globals
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,70 @@ class DriverInfo(TypedDict):
 
 def _get_reader(request: Request) -> InfluxReader:
     return request.app.state.influx_reader
+
+
+def _finite(x: float | None, default: float = 0.0) -> float:
+    """JSON 拒收 inf/nan；舊列若寫進 inf 也要洗掉。"""
+    import math
+
+    try:
+        v = float(x) if x is not None else default
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _timebase_payload(row: TimebaseCalibration) -> dict:
+    return {
+        "session_id": row.session_id,
+        "transponder_id": row.transponder_id,
+        "offset_sec": _finite(row.offset_sec),
+        "drift_sec_per_hour": _finite(row.drift_sec_per_hour),
+        "matched_pairs": int(row.matched_pairs or 0),
+        "residual_std_sec": _finite(row.residual_std_sec),
+        "quality": row.quality,
+        "calibrated_at": row.calibrated_at.isoformat() if row.calibrated_at else None,
+    }
+
+
+async def _resolve_tid_for_session(reader: InfluxReader, session_id: str, tid: str | None) -> str:
+    if tid:
+        return tid.upper().strip()
+    summary = await reader.get_session_summary(session_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="此場次沒有 decoder 摘要")
+    best = max(summary, key=lambda r: r.lap_count)
+    return (best.transponder_id or "").upper().strip()
+
+
+def _vs_decoder_map(
+    laps: list,
+    decoder_laps: list,
+) -> dict[int, tuple[float, float]]:
+    """依圈速序列 lag 對齊 → {gps_lap_number: (decoder_lap_time, vs_sec)}。"""
+    import numpy as np
+
+    from services.decoder_ingest.timebase_calibration import _best_lag_align
+
+    complete = [lap for lap in laps if lap.is_complete]
+    if not complete or not decoder_laps:
+        return {}
+
+    gps_times = np.array([lap.lap_time for lap in complete], dtype=float)
+    dec_times = np.array([d.lap_time for d in decoder_laps], dtype=float)
+    dec_off, gps_off, n = _best_lag_align(dec_times, gps_times, max_lag=3)
+    if n < 1:
+        return {}
+    # 對齊後圈速 MAE 太大就不顯示
+    mae = float(np.median(np.abs(dec_times[dec_off : dec_off + n] - gps_times[gps_off : gps_off + n])))
+    if mae > 8.0:
+        return {}
+    mapping: dict[int, tuple[float, float]] = {}
+    for i in range(n):
+        gl = complete[gps_off + i]
+        dl = decoder_laps[dec_off + i]
+        mapping[gl.lap_number] = (float(dl.lap_time), float(gl.lap_time - dl.lap_time))
+    return mapping
 
 
 async def _binding_lookups(
@@ -381,8 +445,16 @@ async def session_lap_tracks_api(
 
 
 @router.get("/api/sessions/{session_id}/gps-laps")
-async def session_gps_laps_api(request: Request, session_id: str):
-    """GPS 虛擬起跑線分圈（平行於 decoder track-laps，不依賴 decoder）。"""
+async def session_gps_laps_api(
+    request: Request,
+    session_id: str,
+    tid: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """GPS 虛擬起跑線分圈（平行於 decoder track-laps，不依賴 decoder）。
+
+    若 SQLite 有 good/marginal 時基校準，complete 圈附 vs decoder 欄。
+    """
     from services.webapp.track_coords import start_gate_latlng
 
     reader = _get_reader(request)
@@ -393,13 +465,34 @@ async def session_gps_laps_api(request: Request, session_id: str):
         logger.exception("gps_laps: failed to read from InfluxDB")
         raise HTTPException(status_code=503, detail="InfluxDB 目前無法連線") from exc
 
+    vs_map: dict[int, tuple[float, float]] = {}
+    timebase_info = None
+    try:
+        resolved_tid = await _resolve_tid_for_session(reader, session_id, tid)
+        row = (
+            await db.execute(
+                select(TimebaseCalibration).where(
+                    TimebaseCalibration.session_id == session_id,
+                    TimebaseCalibration.transponder_id == resolved_tid,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is not None and row.quality in ("good", "marginal"):
+            timebase_info = _timebase_payload(row)
+            dec_laps = await reader.get_lap_history(session_id, resolved_tid)
+            vs_map = _vs_decoder_map(laps, dec_laps)
+    except HTTPException:
+        pass
+    except Exception:
+        logger.exception("gps_laps: vs-decoder enrichment failed")
+
     gate_a, gate_b = start_gate_latlng()
-    # 新→舊：lap_number 大到小
     ordered = sorted(laps, key=lambda lap: lap.lap_number, reverse=True)
     return JSONResponse(
         {
             "gate": {"a": [gate_a[0], gate_a[1]], "b": [gate_b[0], gate_b[1]]},
             "source": source,
+            "timebase": timebase_info,
             "laps": [
                 {
                     "lap_number": lap.lap_number,
@@ -409,6 +502,12 @@ async def session_gps_laps_api(request: Request, session_id: str):
                     "ended_at": lap.ended_at.isoformat(),
                     "is_complete": lap.is_complete,
                     "point_count": len(lap.points),
+                    "decoder_lap_time": (
+                        vs_map[lap.lap_number][0] if lap.lap_number in vs_map else None
+                    ),
+                    "vs_decoder_sec": (
+                        vs_map[lap.lap_number][1] if lap.lap_number in vs_map else None
+                    ),
                     "points": [
                         {
                             "lat": point.lat,
@@ -423,3 +522,88 @@ async def session_gps_laps_api(request: Request, session_id: str):
             ],
         }
     )
+
+
+@router.post("/api/sessions/{session_id}/timebase-calibration")
+async def post_timebase_calibration(
+    request: Request,
+    session_id: str,
+    tid: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import datetime, timezone
+
+    from services.decoder_ingest.timebase_calibration import calibrate
+
+    reader = _get_reader(request)
+    try:
+        resolved_tid = await _resolve_tid_for_session(reader, session_id, tid)
+        decoder_passings = await reader.get_decoder_passings(session_id, resolved_tid)
+        gps_crossings = await reader.get_gps_crossing_times(session_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("timebase calibration: influx failed")
+        raise HTTPException(status_code=503, detail="InfluxDB 目前無法連線") from exc
+
+    result = calibrate(decoder_passings, gps_crossings)
+    now = datetime.now(timezone.utc)
+    existing = (
+        await db.execute(
+            select(TimebaseCalibration).where(
+                TimebaseCalibration.session_id == session_id,
+                TimebaseCalibration.transponder_id == resolved_tid,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        existing = TimebaseCalibration(
+            session_id=session_id,
+            transponder_id=resolved_tid,
+            offset_sec=result.offset_sec,
+            drift_sec_per_hour=result.drift_sec_per_hour,
+            matched_pairs=result.matched_pairs,
+            residual_std_sec=result.residual_std_sec,
+            quality=result.quality,
+            calibrated_at=now,
+        )
+        db.add(existing)
+    else:
+        existing.offset_sec = result.offset_sec
+        existing.drift_sec_per_hour = result.drift_sec_per_hour
+        existing.matched_pairs = result.matched_pairs
+        existing.residual_std_sec = result.residual_std_sec
+        existing.quality = result.quality
+        existing.calibrated_at = now
+    await db.commit()
+    await db.refresh(existing)
+    return JSONResponse(_timebase_payload(existing))
+
+
+@router.get("/api/sessions/{session_id}/timebase-calibration")
+async def get_timebase_calibration(
+    request: Request,
+    session_id: str,
+    tid: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    reader = _get_reader(request)
+    try:
+        resolved_tid = await _resolve_tid_for_session(reader, session_id, tid)
+    except HTTPException:
+        # 無 decoder 摘要時仍允許依 query tid 查
+        if not tid:
+            raise
+        resolved_tid = tid.upper().strip()
+
+    row = (
+        await db.execute(
+            select(TimebaseCalibration).where(
+                TimebaseCalibration.session_id == session_id,
+                TimebaseCalibration.transponder_id == resolved_tid,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="尚無時基校準結果")
+    return JSONResponse(_timebase_payload(row))

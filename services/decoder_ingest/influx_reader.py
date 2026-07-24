@@ -267,6 +267,68 @@ class InfluxReader:
         # 正規化後只剩 canonical tid 的情況）。
         return await self._lap_history_from_archive(session_id, tid_candidates)
 
+    async def get_decoder_passings(
+        self, session_id: str, transponder_id: str
+    ) -> list[datetime]:
+        """原始過線時間戳（含第一次 last_lap_time=0），供時基校準。"""
+        from .lap_tracker import normalize_transponder_id
+
+        tid = transponder_id.upper().strip()
+        canon = normalize_transponder_id(tid)
+        tid_candidates = {tid, canon}
+        if len(canon) >= 12 and canon[11] == "7":
+            tid_candidates.add(canon[:11] + "6")
+            tid_candidates.add(canon[:11] + "8")
+        tid_filter = " or ".join(
+            f'r.transponder_id == "{t}"' for t in sorted(tid_candidates)
+        )
+        query = (
+            f'from(bucket: "{self._config.bucket}") '
+            f"|> range(start: 0) "
+            f'|> filter(fn: (r) => r._measurement == "{self._measurement}" '
+            f'and r.event_type == "passing" and r.session_id == "{session_id}") '
+            f'|> filter(fn: (r) => r._field == "last_lap_time" '
+            f'or r._field == "transponder_id") '
+            f'|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
+            f"|> filter(fn: (r) => {tid_filter}) "
+            f'|> sort(columns: ["_time"])'
+        )
+        tables = await self._query(query)
+        times: list[datetime] = []
+        for table in tables:
+            for row in table.records:
+                ts = row.get_time()
+                if ts is None:
+                    continue
+                times.append(ts)
+        times.sort()
+        return times
+
+    async def get_gps_crossing_times(self, session_id: str) -> list[datetime]:
+        """GPS gate 穿越時間（防抖後）。"""
+        from services.webapp.track_coords import (
+            GATE_FORWARD_BEARING_DEG,
+            START_GATE_A_M,
+            START_GATE_B_M,
+        )
+
+        from .gps_lap_splitter import find_gate_crossings
+
+        bounds = await self._session_time_bounds(session_id)
+        if bounds is None:
+            return []
+        points, _source = await self._query_track_points(
+            device_id=self._TRACK_DEVICE_ID,
+            start=bounds[0],
+            stop=bounds[1],
+        )
+        if not points:
+            return []
+        crossings = find_gate_crossings(
+            points, START_GATE_A_M, START_GATE_B_M, GATE_FORWARD_BEARING_DEG
+        )
+        return [c.crossed_at for c in crossings]
+
     async def _lap_history_from_archive(
         self, session_id: str, tid_candidates: set[str]
     ) -> list[LapRecord]:
@@ -429,7 +491,7 @@ class InfluxReader:
         # 略放寬尾端，避免最後幾秒 GPS 被 range stop 切掉
         return started, ended + timedelta(seconds=2)
 
-    async def get_gps_lap_tracks(self, session_id: str) -> tuple[list, str]:
+    async def get_gps_lap_tracks(self, session_id: str):
         """用虛擬起跑線切 GPS 軌跡成圈。回傳 (laps, source)。
 
         source 與 _query_track_points 一致（gps_track / kart_telemetry / dr_position）。
@@ -440,7 +502,7 @@ class InfluxReader:
             START_GATE_B_M,
         )
 
-        from .gps_lap_splitter import GpsLap, split_laps_by_gate
+        from .gps_lap_splitter import split_laps_by_gate
 
         bounds = await self._session_time_bounds(session_id)
         if bounds is None:
@@ -455,7 +517,7 @@ class InfluxReader:
         if not points:
             return [], source
 
-        laps: list[GpsLap] = split_laps_by_gate(
+        laps = split_laps_by_gate(
             points,
             START_GATE_A_M,
             START_GATE_B_M,
@@ -600,6 +662,22 @@ class InfluxReader:
         start: datetime,
         stop: datetime,
     ) -> tuple[list[TrackPoint], str]:
+        import os
+
+        # 離線 RTS 平滑軌跡（預設關；TRACK_USE_SMOOTHED=1 才啟用）
+        if os.getenv("TRACK_USE_SMOOTHED", "").strip() in ("1", "true", "TRUE", "yes"):
+            smoothed = await self._fetch_track_points(
+                measurement="track_smoothed",
+                field_map={"lat_s": "lat", "lon_s": "lon"},
+                speed_field="speed_mps",
+                device_id=device_id,
+                start=start,
+                stop=stop,
+                extra_tag_filter="",
+            )
+            if smoothed:
+                return smoothed, "track_smoothed"
+
         # 雙 GPS 不混合：先 m10180c，無資料再 neo6m
         gps_track = await self._fetch_track_points(
             measurement="gps_track",

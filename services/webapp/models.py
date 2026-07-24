@@ -145,3 +145,27 @@ class SessionAiCoachReport(Base):
     status: Mapped[str] = mapped_column(default="pending")  # pending|running|done|failed
     error_message: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class TimebaseCalibration(Base):
+    """Decoder ↔ GPS 時基校準結果（每場次每支 tid 一筆）。
+
+    offset/drift 把 GPS 時間映到 decoder 時基，供 gps-laps「vs decoder」欄使用。
+    """
+
+    __tablename__ = "timebase_calibration"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "transponder_id", name="uq_timebase_session_tid"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(index=True)
+    transponder_id: Mapped[str] = mapped_column()
+    offset_sec: Mapped[float] = mapped_column()
+    drift_sec_per_hour: Mapped[float] = mapped_column(default=0.0)
+    matched_pairs: Mapped[int] = mapped_column(default=0)
+    residual_std_sec: Mapped[float] = mapped_column(default=0.0)
+    quality: Mapped[str] = mapped_column(default="failed")  # good|marginal|failed
+    calibrated_at: Mapped[datetime] = mapped_column(default=_utcnow)

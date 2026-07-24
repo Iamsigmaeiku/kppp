@@ -351,13 +351,17 @@ function sessionLapViewer(sessionId, transponderId, track) {
         const b = pts[i + 1];
         const aLL = [a.lat, a.lon];
         const bLL = [b.lat, b.lon];
-        // 時間差 > 2.0 秒 或 距離 > 40 公尺 → 缺口，不畫弦
+        // 連續門檻 5s / 80m；超過改畫虛線灰弦（標缺口）
         const dtMs = Date.parse(b.recorded_at) - Date.parse(a.recorded_at);
         const dlat = (b.lat - a.lat) * 111320;
         const dlon = (b.lon - a.lon) * 111320 * Math.cos((a.lat + b.lat) * Math.PI / 360);
         const distM = Math.sqrt(dlat * dlat + dlon * dlon);
-        if (dtMs > 2000 || distM > 40) continue;
-        latlngs.push(aLL, bLL);
+        latlngs.push(aLL);
+        // 大缺口不連線（虛線弦 = 蜘蛛網）
+        if (dtMs > 5000 || distM > 80) {
+          continue;
+        }
+        latlngs.push(bLL);
         const speeds = [a.speed_mps, b.speed_mps].filter((s) => s != null && !Number.isNaN(s));
         const speed = speeds.length
           ? speeds.reduce((sum, s) => sum + s, 0) / speeds.length

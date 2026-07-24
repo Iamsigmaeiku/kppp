@@ -71,7 +71,7 @@ INFLUX_URL=http://127.0.0.1:8086
 INFLUX_TOKEN=kpp-dev-influx-token-change-me
 INFLUX_ORG=kpp
 INFLUX_BUCKET=decoder
-DASHBOARD_PORT=5000
+DASHBOARD_PORT=8000
 """
 
 
@@ -106,7 +106,8 @@ def main():
         ("INFLUX_TOKEN", "kpp-dev-influx-token-change-me"),
         ("INFLUX_ORG", "kpp"),
         ("INFLUX_BUCKET", "decoder"),
-        ("DASHBOARD_PORT", "5000"),
+        # chuck 上 :5000 是 port5000_proxy → 實際 FastAPI 聽 :8000
+        ("DASHBOARD_PORT", "8000"),
     ]:
         # Do NOT use sed with values containing '&' — sed treats & as matched text.
         run(c, f"grep -v '^{key}=' ~/kpp/.env > /tmp/kpp.env.fix && mv /tmp/kpp.env.fix ~/kpp/.env")
@@ -114,18 +115,16 @@ def main():
 
     run(c, "cd ~/kpp && .venv/bin/pip install -q -r requirements.txt", check=False)
 
-    # restart dashboard on :5000
+    # 用 systemd 重啟；勿 nohup 搶 :5000（那是 proxy）
     run(
         c,
-        "pkill -f 'services.decoder_ingest.main --with-dashboard' || true; "
-        "sleep 1; "
-        "cd ~/kpp && nohup .venv/bin/python -m services.decoder_ingest.main --with-dashboard "
-        "> /tmp/kpp-dashboard.log 2>&1 & echo started; sleep 3; "
+        "systemctl --user restart kpp-dashboard.service; sleep 4; "
+        "systemctl --user is-active kpp-dashboard.service; "
         "curl -s -o /dev/null -w 'telemetry:%{http_code}\\n' http://127.0.0.1:5000/telemetry; "
+        "curl -s -o /dev/null -w 'login:%{http_code}\\n' http://127.0.0.1:5000/login; "
         "curl -s -o /dev/null -w 'grafana:%{http_code}\\n' "
         "'http://127.0.0.1:5000/grafana/d/kart-telemetry/kart-telemetry-f1?orgId=1&kiosk&theme=dark'; "
-        "curl -s -o /dev/null -w 'ingest_opt:%{http_code}\\n' -X OPTIONS http://127.0.0.1:5000/api/telemetry/ingest; "
-        "tail -40 /tmp/kpp-dashboard.log",
+        "tail -30 /tmp/kpp-dashboard.log",
         check=False,
     )
     c.close()

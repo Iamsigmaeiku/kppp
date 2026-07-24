@@ -38,6 +38,37 @@ TYPE_DBG = 0x05
 ACCEL_SENS = 2048.0
 GYRO_SENS = 16.4
 
+# 重力 LPF（慢跟姿態，快動態留給 a_lat/a_lon / accel_dyn）
+_GRAV_LPF_ALPHA = 0.05
+
+
+def _enrich_icm_motion(
+    sample: TelemetrySample, grav: list[float] | None = None
+) -> TelemetrySample:
+    """從 ICM ax/ay/az 算出 a_lat/a_lon/accel_dyn。
+
+    安裝假設：靜止時 +Y ≈ 重力。有 grav 狀態就做 LPF 扣重力；
+    否則 fallback ay−1（跟舊註解一致）。
+    """
+    if sample.ax is None or sample.ay is None or sample.az is None:
+        return sample
+    ax, ay, az = float(sample.ax), float(sample.ay), float(sample.az)
+    if grav is not None and len(grav) == 3:
+        if grav[0] == 0.0 and grav[1] == 0.0 and grav[2] == 0.0:
+            grav[0], grav[1], grav[2] = ax, ay, az
+        else:
+            a = _GRAV_LPF_ALPHA
+            grav[0] = (1.0 - a) * grav[0] + a * ax
+            grav[1] = (1.0 - a) * grav[1] + a * ay
+            grav[2] = (1.0 - a) * grav[2] + a * az
+        dx, dy, dz = ax - grav[0], ay - grav[1], az - grav[2]
+    else:
+        dx, dy, dz = ax, ay - 1.0, az
+    sample.a_lon = dx
+    sample.a_lat = dz
+    sample.accel_dyn = math.sqrt(dx * dx + dy * dy + dz * dz)
+    return sample
+
 IMU_WRITE_MIN_SEC = 1.0 / 50.0  # ≤50 Hz into Influx
 MPU_WRITE_MIN_SEC = 1.0 / 50.0
 
@@ -46,8 +77,8 @@ ITOW_EPOCH_GUARD_MS = 1_577_836_800_000  # 2020-01-01 Unix ms
 GPS_MAX_SPEED_MPS = 45.0  # 跳點剔除速度上限（公尺/秒）
 GPS_JUMP_RESET_STREAK = 5  # 連續飛點後重置基準
 GPS_MIN_FIX_TYPE = 3  # 最低 fix 類型（3=3D）
-GPS_MIN_SV = 6  # 最低衛星數
-GPS_MAX_H_ACC_MM = 15_000  # 水平精度上限（毫米）
+GPS_MIN_SV = 4  # 最低衛星數（放寬以保留走線密度；分圈靠 gate 半寬吃噪）
+GPS_MAX_H_ACC_MM = 25_000  # 水平精度上限（毫米）
 GPS_REANCHOR_DRIFT_MS = 5_000  # |fix_time - now| 超過此值重新錨定（毫秒）
 GPS_ITOW_WRAP_GUARD_MS = 1_000  # iTOW 回捲偵測：低於錨定值減此量（毫秒）
 DROP_WARN_INTERVAL_SEC = 30.0  # drop 統計警告間隔（秒）
@@ -295,6 +326,8 @@ class UdpTelemetryServer:
         self._ok = 0
         self._gps_drops = 0
         self._imu_drops = 0
+        # ICM 重力 LPF 狀態（供 a_lat/a_lon/accel_dyn）
+        self._grav_lpf: list[float] = [0.0, 0.0, 0.0]
         # iTOW 錨定狀態
         self._anchor_itow: int | None = None
         self._anchor_server_time: float | None = None  # Unix 秒
@@ -505,11 +538,14 @@ class UdpTelemetryServer:
             if now - self._last_imu_write < IMU_WRITE_MIN_SEC:
                 parsed = _parse_imu(payload)
                 if parsed:
+                    _enrich_icm_motion(parsed[-1], self._grav_lpf)
                     self._update_cache(parsed[-1])
                 return
             self._last_imu_write = now
             samples = _parse_imu(payload)
             if samples:
+                for s in samples:
+                    _enrich_icm_motion(s, self._grav_lpf)
                 self._enqueue(samples[-1], gps=False)
             return
         if typ == TYPE_MPU:

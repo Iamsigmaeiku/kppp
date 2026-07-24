@@ -16,14 +16,14 @@ MPP = 0.1377
 IMG_W, IMG_H = 1280, 1280
 CENTER_PX = (IMG_W / 2, IMG_H / 2)
 
-# 起跑線：賽道右側直線白色橫線。座標為本地公尺 (x_m, y_m)，
-# 由 tks_qiaotou_track.png 像素座標經 px_to_local_m() 換算。
-# ⚠️ PLACEHOLDER——用 scripts/calibrate_start_gate.py 定出真值後回填。
-# 線段長度取白線實際寬 + 兩側各外擴 ~3m（GPS 誤差 2–3m，太短會漏切）。
-START_GATE_A_M = (55.0, -20.0)  # 線段端點（賽道內側）
-START_GATE_B_M = (70.0, -20.0)  # 線段端點（賽道外側）
-# 行進方向方位角（度）：0=+y 北、90=+x 東。用來過濾反向穿越。
-GATE_FORWARD_BEARING_DEG = 0.0
+# 起跑線：賽道右側直線「起跑格前方」白色橫線。
+# 白線約 y=711、x=925–977；兩端拉到 ~±22m 半寬（對齊 gps_lap_splitter.GATE_HALF_WIDTH_M），
+# 吃 GPS 橫漂，避免掠過端點漏切。行進方向：右側直線由南往北。
+# 中心 ≈ (45.44, -9.78)；A/B = 中心 ± 22m 沿 +x。
+START_GATE_A_M = (23.441, -9.7767)  # 內側（半寬外擴）
+START_GATE_B_M = (67.441, -9.7767)  # 外側
+GATE_FORWARD_BEARING_DEG = 0.0  # 0° = +y 北
+GATE_HALF_WIDTH_M = 22.0
 
 
 def px_to_local_m(px: float, py: float) -> tuple[float, float]:

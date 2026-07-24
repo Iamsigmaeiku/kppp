@@ -61,6 +61,7 @@
     font-size: 0.8rem;
     cursor: pointer;
   }
+  .telemetry-timebar .chip:hover { border-color: var(--accent, #5b8def); }
   .telemetry-timebar .chip.active {
     border-color: var(--accent, #5b8def);
     background: color-mix(in srgb, var(--accent, #5b8def) 18%, var(--panel));
@@ -81,7 +82,14 @@
     font-size: 0.8rem;
   }
   .telemetry-timebar .apply-btn {
+    appearance: none;
+    border: 1px solid var(--accent, #5b8def);
+    background: color-mix(in srgb, var(--accent, #5b8def) 18%, var(--panel));
+    color: var(--text);
+    border-radius: 6px;
+    padding: 0.28rem 0.75rem;
     font-size: 0.8rem;
+    cursor: pointer;
   }
   .telemetry-timebar .mode-hint {
     color: var(--text-faint);
@@ -140,7 +148,7 @@
   }
   .gps-lap-row {
     display: grid;
-    grid-template-columns: 3.2rem 6.5rem 4.5rem 4rem 1fr;
+    grid-template-columns: 3.2rem 6.5rem 4.5rem 5rem 4rem 1fr;
     gap: 0.5rem;
     align-items: center;
     text-align: left;
@@ -306,6 +314,9 @@
       </template>
     </select>
     <button type="button" class="btn" @click="load()" :disabled="loading || !sessionId">重新載入</button>
+    <button type="button" class="btn" @click="calibrate()" :disabled="loading || calibrating || !sessionId">
+      時基校準
+    </button>
   </div>
   <template x-if="loading"><p style="color:var(--text-dim);">載入中…</p></template>
   <template x-if="error && !loading">
@@ -326,6 +337,7 @@
             <b x-text="'#' + lap.lap_number"></b>
             <span :class="isBest(lap) ? 'best' : ''" x-text="lap.lap_time_label"></span>
             <span class="delta" x-text="deltaLabel(lap)"></span>
+            <span class="delta" x-text="vsDecoderLabel(lap)"></span>
             <span x-text="lap.point_count + ' pts'"></span>
             <span class="tag" x-show="!lap.is_complete">未閉合</span>
           </button>
@@ -540,11 +552,13 @@ function gpsLapViewer() {
     sessions: [],
     sessionId: '',
     loading: false,
+    calibrating: false,
     error: '',
     laps: [],
     selectedLap: null,
     gate: null,
     source: '',
+    timebase: null,
     _map: null,
     _mapLayer: null,
     async init() {
@@ -581,13 +595,35 @@ function gpsLapViewer() {
         this.laps = Array.isArray(data.laps) ? data.laps : [];
         this.gate = data.gate || null;
         this.source = data.source || '';
+        this.timebase = data.timebase || null;
+        // 預選最新一筆「有效閉合圈」，方便分開看每一圈走線
+        const firstComplete = this.laps.find(
+          (lap) => lap.is_complete && Array.isArray(lap.points) && lap.points.length
+        );
         const firstWithPoints = this.laps.find((lap) => Array.isArray(lap.points) && lap.points.length);
-        this.selectedLap = firstWithPoints?.lap_number ?? this.laps[0]?.lap_number ?? null;
+        this.selectedLap = firstComplete?.lap_number ?? firstWithPoints?.lap_number ?? this.laps[0]?.lap_number ?? null;
       } catch (err) {
         this.error = `載入 GPS 分圈失敗：${err?.message || err}`;
         this.laps = [];
       } finally {
         this.loading = false;
+      }
+    },
+    async calibrate() {
+      if (!this.sessionId) return;
+      this.calibrating = true;
+      this.error = '';
+      try {
+        const res = await fetch(`/api/sessions/${this.sessionId}/timebase-calibration`, {
+          method: 'POST',
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        this.timebase = await res.json();
+        await this.load();
+      } catch (err) {
+        this.error = `時基校準失敗：${err?.message || err}`;
+      } finally {
+        this.calibrating = false;
       }
     },
     completeLaps() {
@@ -609,6 +645,12 @@ function gpsLapViewer() {
       if (Math.abs(d) < 1e-6) return 'best';
       return (d >= 0 ? '+' : '') + d.toFixed(3);
     },
+    vsDecoderLabel(lap) {
+      if (!lap.is_complete || lap.vs_decoder_sec == null) return '—';
+      const d = lap.vs_decoder_sec;
+      if (Math.abs(d) < 1e-3) return 'vs0';
+      return 'vs' + (d >= 0 ? '+' : '') + d.toFixed(3);
+    },
     summaryText() {
       const n = this.laps.length;
       const m = this.completeLaps().length;
@@ -616,7 +658,11 @@ function gpsLapViewer() {
       const bestLabel = best == null ? '—' : (
         this.completeLaps().find((lap) => Math.abs(lap.lap_time - best) < 1e-6)?.lap_time_label || best.toFixed(3) + 's'
       );
-      return `共 ${n} 圈（有效 ${m}）· 最佳 ${bestLabel} · 來源 ${this.source || '—'}`;
+      let tb = '';
+      if (this.timebase) {
+        tb = ` · 時基 ${this.timebase.quality} offset=${Number(this.timebase.offset_sec).toFixed(3)}s`;
+      }
+      return `共 ${n} 圈（有效 ${m}）· 最佳 ${bestLabel} · 來源 ${this.source || '—'}${tb}`;
     },
     selectedLapData() {
       return this.laps.find((lap) => lap.lap_number === this.selectedLap) || null;
@@ -696,8 +742,12 @@ function gpsLapViewer() {
         const dlat = (b.lat - a.lat) * 111320;
         const dlon = (b.lon - a.lon) * 111320 * Math.cos((a.lat + b.lat) * Math.PI / 360);
         const distM = Math.sqrt(dlat * dlat + dlon * dlon);
-        if (dtMs > 2000 || distM > 40) continue;
-        latlngs.push(aLL, bLL);
+        latlngs.push(aLL);
+        // 大缺口：不連線（虛線弦會變成蜘蛛網）。小段才畫速度色。
+        if (dtMs > 5000 || distM > 80) {
+          continue;
+        }
+        latlngs.push(bLL);
         const speeds = [a.speed_mps, b.speed_mps].filter((s) => s != null && !Number.isNaN(s));
         const speed = speeds.length
           ? speeds.reduce((sum, s) => sum + s, 0) / speeds.length

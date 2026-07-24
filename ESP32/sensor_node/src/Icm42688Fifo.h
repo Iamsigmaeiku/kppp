@@ -35,6 +35,8 @@ class Icm42688Fifo {
   bool begin();
   /** Drain FIFO into out[]; returns count (max max_n). Assigns ts_us via micros(). */
   size_t readFifo(IcmFifoSample *out, size_t max_n);
+  /** 執行期健康檢查（WHO_AM_I）；線鬆 / SPI 掛了回 false。 */
+  bool whoamiOk();
 
   static constexpr float kAccelSens = 2048.0f;  // ±16g
   static constexpr float kGyroSens = 16.4f;     // ±2000 dps
