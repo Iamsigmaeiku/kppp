@@ -1,10 +1,15 @@
 #include "UbxM10.h"
 
 #include <Arduino.h>
+#include <esp_timer.h>
 
 namespace {
 
 constexpr uint8_t kLayerRamBbr = 0x03;
+
+#ifndef GNSS_CONFIGURE_TIMEPULSE
+#define GNSS_CONFIGURE_TIMEPULSE 0
+#endif
 
 size_t ubxCfgValueSize(uint32_t keyId) {
   switch ((keyId >> 28) & 0x07u) {
@@ -106,6 +111,56 @@ void UbxM10::sendNavConfig() {
   sendValSet(kLayerRamBbr, kKeys, kVals, sizeof(kKeys) / sizeof(kKeys[0]));
 }
 
+void UbxM10::sendTimePulseConfig() {
+#if GNSS_CONFIGURE_TIMEPULSE
+  // u-blox M10 CFG-TP (SPG 5.20):
+  // - TP1 enabled, UTC/GNSS disciplined and aligned to top-of-second
+  // - falling edge is the epoch edge because this carrier board's PPS LED is
+  //   active-low (a rising/positive pulse makes it look continuously lit)
+  // - no unlocked pulse; after valid GNSS time, 1 Hz with 100 ms low pulse
+  // Clock-quality logic must still reject epochs whose NAV-PVT time flags are
+  // invalid; seeing a pulse alone never means UTC is fully resolved.
+  static const uint32_t kKeys[] = {
+      0x20050023u,  // CFG-TP-PULSE_DEF = PERIOD
+      0x20050030u,  // CFG-TP-PULSE_LENGTH_DEF = LENGTH
+      0x40050002u,  // CFG-TP-PERIOD_TP1 [us]
+      0x40050003u,  // CFG-TP-PERIOD_LOCK_TP1 [us]
+      0x40050004u,  // CFG-TP-LEN_TP1 [us]
+      0x40050005u,  // CFG-TP-LEN_LOCK_TP1 [us]
+      0x10050007u,  // CFG-TP-TP1_ENA
+      0x10050008u,  // CFG-TP-SYNC_GNSS_TP1
+      0x10050009u,  // CFG-TP-USE_LOCKED_TP1
+      0x1005000au,  // CFG-TP-ALIGN_TO_TOW_TP1
+      0x1005000bu,  // CFG-TP-POL_TP1: falling edge at top-of-second
+      0x2005000cu,  // CFG-TP-TIMEGRID_TP1: UTC
+  };
+  static const uint32_t kVals[] = {
+      0u, 1u, 1000000u, 1000000u, 0u, 100000u,
+      1u, 1u, 1u,       1u,       0u, 0u,
+  };
+  resetParser();
+  ack_seen_ = false;
+  sendValSet(kLayerRamBbr, kKeys, kVals, sizeof(kKeys) / sizeof(kKeys[0]));
+  const bool accepted = waitForAck(0x06, 0x8A, 800);
+  Serial.printf("[gps] CFG-TP VALSET %s\n", accepted ? "ACK" : "NO-ACK/NAK");
+#endif
+}
+
+bool UbxM10::waitForAck(uint8_t cls, uint8_t id, uint32_t timeout_ms) {
+  const uint32_t started = millis();
+  while (millis() - started < timeout_ms) {
+    UbxPvt ignored{};
+    (void)poll(ignored);
+    if (ack_seen_ && ack_cls_ == cls && ack_id_ == id) {
+      const bool ok = ack_ok_;
+      ack_seen_ = false;
+      return ok;
+    }
+    delay(1);
+  }
+  return false;
+}
+
 void UbxM10::configure(int rx_pin, int tx_pin) {
   rx_ = rx_pin;
   tx_ = tx_pin;
@@ -153,8 +208,12 @@ void UbxM10::configure(int rx_pin, int tx_pin) {
   ser_.begin(115200, SERIAL_8N1, rx_, tx_);
   delay(80);
   sendNavConfig();
+  delay(40);
+  sendTimePulseConfig();
   resetParser();
-  Serial.println("[gps] M10 VALSET: UBX-NAV-PVT @10Hz 115200");
+  Serial.printf("[gps] M10 VALSET: UBX-NAV-PVT @10Hz 115200, TP1=%s\n",
+                GNSS_CONFIGURE_TIMEPULSE ? "1Hz UTC falling(active-low)"
+                                         : "unchanged");
 }
 
 uint32_t UbxM10::takeRxBytes() {
@@ -163,11 +222,28 @@ uint32_t UbxM10::takeRxBytes() {
   return n;
 }
 
+uint32_t UbxM10::takeParserErrors() {
+  const uint32_t n = parser_errors_;
+  parser_errors_ = 0;
+  return n;
+}
+
 bool UbxM10::handlePayload(UbxPvt &out) {
   if (cls_ != 0x01 || id_ != 0x07 || len_ < 92) return false;
   const uint8_t *p = payload_;
   out.itow = leu32(&p[0]);
+  out.year = (uint16_t)p[4] | ((uint16_t)p[5] << 8);
+  out.month = p[6];
+  out.day = p[7];
+  out.hour = p[8];
+  out.minute = p[9];
+  out.second = p[10];
+  out.valid_flags = p[11];
+  out.t_acc = leu32(&p[12]);
+  out.nano = le32(&p[16]);
   out.fix_type = p[20];
+  out.flags = p[21];
+  out.flags2 = p[22];
   out.num_sv = p[23];
   out.lon = le32(&p[24]);
   out.lat = le32(&p[28]);
@@ -180,6 +256,8 @@ bool UbxM10::handlePayload(UbxPvt &out) {
   out.g_speed = le32(&p[60]);
   out.head_mot = le32(&p[64]);
   out.s_acc = leu32(&p[68]);
+  out.head_acc = leu32(&p[72]);
+  out.sensor_time_us = (uint64_t)esp_timer_get_time();
   out.valid = (out.fix_type >= 2);
   return true;
 }
@@ -219,6 +297,7 @@ bool UbxM10::poll(UbxPvt &out) {
         ck_b_ = (uint8_t)(ck_b_ + ck_a_);
         idx_ = 0;
         if (len_ > sizeof(payload_)) {
+          parser_errors_++;
           resetParser();
         } else {
           state_ = (len_ == 0) ? 7 : 6;
@@ -233,16 +312,27 @@ bool UbxM10::poll(UbxPvt &out) {
         break;
       case 7:
         if (b != ck_a_) {
+          parser_errors_++;
           resetParser();
           break;
         }
         state_ = 8;
         break;
       case 8:
+        if (b == ck_b_ && cls_ == 0x05 && len_ == 2 &&
+            (id_ == 0x00 || id_ == 0x01)) {
+          ack_cls_ = payload_[0];
+          ack_id_ = payload_[1];
+          ack_ok_ = (id_ == 0x01);
+          ack_seen_ = true;
+          resetParser();
+          break;
+        }
         if (b == ck_b_ && handlePayload(out)) {
           resetParser();
           return true;
         }
+        if (b != ck_b_) parser_errors_++;
         resetParser();
         break;
       default:

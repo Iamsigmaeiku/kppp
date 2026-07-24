@@ -62,6 +62,47 @@ class TelemetrySample(BaseModel):
     gps_hdop: float | None = None
     gps_satellites: int | None = None
     gps_fresh: float | None = None  # 1=fresh fix, 0=held stale
+    # Raw UBX-NAV-PVT quality/time fields.  These remain present even when a
+    # quality gate rejects the position, so an audit can explain the hole.
+    gps_itow_ms: int | None = None
+    gps_year: int | None = None
+    gps_month: int | None = None
+    gps_day: int | None = None
+    gps_hour: int | None = None
+    gps_minute: int | None = None
+    gps_second: int | None = None
+    gps_nano: int | None = None
+    gps_valid_flags: int | None = None
+    gps_t_acc_ns: int | None = None
+    gps_fix_type: int | None = None
+    gps_flags: int | None = None
+    gps_flags2: int | None = None
+    gps_h_acc_mm: int | None = None
+    gps_v_acc_mm: int | None = None
+    gps_s_acc_mmps: int | None = None
+    gps_head_acc_1e5deg: int | None = None
+    gps_vel_n_mmps: int | None = None
+    gps_vel_e_mmps: int | None = None
+    gps_vel_d_mmps: int | None = None
+    gps_packet_seq: int | None = None
+    gps_gate_accepted: int | None = None
+    gps_gate_reason: int | None = None
+    sensor_time_us: int | None = None
+    gnss_time_ns: int | None = None
+    receive_time_ns: int | None = None
+    pps_time_us: int | None = None
+    pps_seq: int | None = None
+    pps_age_ms: int | None = None
+    gps_rx_bps: int | None = None
+    gps_queue_drops: int | None = None
+    queue_drops: int | None = None
+    ring_drops: int | None = None
+    gps_ring_drops: int | None = None
+    gps_parser_errors: int | None = None
+    gps_uart_overflows: int | None = None
+    crc_errors: int | None = None
+    server_queue_drops: int | None = None
+    influx_write_failures: int | None = None
     # MPU6050 on sensor_node (type 0x04) — secondary IMU
     mpu_ax: float | None = None
     mpu_ay: float | None = None
@@ -71,6 +112,8 @@ class TelemetrySample(BaseModel):
     mpu_gz: float | None = None
     mpu_temp_c: float | None = None
     imu_fault: float | None = None  # 1 if dual-IMU consistency fail
+    imu_source_code: int | None = None  # 1=ICM, 2=MPU failover, 3=legacy blend
+    imu_reject_reason: int | None = None  # 1=dual-IMU inconsistency
     lat_dr: float | None = None
     lon_dr: float | None = None
     dr_heading_deg: float | None = None
@@ -94,6 +137,24 @@ def _require_ingest_token(request: Request, authorization: str | None) -> None:
     token = authorization.removeprefix("Bearer ").strip()
     if token != expected:
         raise HTTPException(status_code=401, detail="invalid token")
+
+
+@router.get("/current-session")
+async def telemetry_current_session(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """供受信任的邊緣處理器取得場次，不依賴瀏覽器登入 cookie。"""
+    _require_ingest_token(request, authorization)
+    from services.decoder_ingest.dashboard import get_session_manager
+
+    manager = get_session_manager()
+    if manager is None:
+        raise HTTPException(status_code=503, detail="session manager not ready")
+    return {
+        "session_id": manager.current_session_id,
+        "started_at": manager.session_started_at.isoformat(),
+    }
 
 
 def _sample_time(sample: TelemetrySample) -> datetime:
@@ -142,6 +203,49 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
         "mpu_gz": sample.mpu_gz,
         "mpu_temp_c": sample.mpu_temp_c,
         "imu_fault": sample.imu_fault,
+        "imu_source_code": sample.imu_source_code,
+        "imu_reject_reason": sample.imu_reject_reason,
+    }
+    integer_fields = {
+        "gps_itow_ms": sample.gps_itow_ms,
+        "gps_year": sample.gps_year,
+        "gps_month": sample.gps_month,
+        "gps_day": sample.gps_day,
+        "gps_hour": sample.gps_hour,
+        "gps_minute": sample.gps_minute,
+        "gps_second": sample.gps_second,
+        "gps_nano": sample.gps_nano,
+        "gps_valid_flags": sample.gps_valid_flags,
+        "gps_t_acc_ns": sample.gps_t_acc_ns,
+        "gps_fix_type": sample.gps_fix_type,
+        "gps_flags": sample.gps_flags,
+        "gps_flags2": sample.gps_flags2,
+        "gps_h_acc_mm": sample.gps_h_acc_mm,
+        "gps_v_acc_mm": sample.gps_v_acc_mm,
+        "gps_s_acc_mmps": sample.gps_s_acc_mmps,
+        "gps_head_acc_1e5deg": sample.gps_head_acc_1e5deg,
+        "gps_vel_n_mmps": sample.gps_vel_n_mmps,
+        "gps_vel_e_mmps": sample.gps_vel_e_mmps,
+        "gps_vel_d_mmps": sample.gps_vel_d_mmps,
+        "gps_packet_seq": sample.gps_packet_seq,
+        "gps_gate_accepted": sample.gps_gate_accepted,
+        "gps_gate_reason": sample.gps_gate_reason,
+        "sensor_time_us": sample.sensor_time_us,
+        "gnss_time_ns": sample.gnss_time_ns,
+        "receive_time_ns": sample.receive_time_ns,
+        "pps_time_us": sample.pps_time_us,
+        "pps_seq": sample.pps_seq,
+        "pps_age_ms": sample.pps_age_ms,
+        "gps_rx_bps": sample.gps_rx_bps,
+        "gps_queue_drops": sample.gps_queue_drops,
+        "queue_drops": sample.queue_drops,
+        "ring_drops": sample.ring_drops,
+        "gps_ring_drops": sample.gps_ring_drops,
+        "gps_parser_errors": sample.gps_parser_errors,
+        "gps_uart_overflows": sample.gps_uart_overflows,
+        "crc_errors": sample.crc_errors,
+        "server_queue_drops": sample.server_queue_drops,
+        "influx_write_failures": sample.influx_write_failures,
     }
     if not skip_imu:
         fields.update(
@@ -171,6 +275,9 @@ def _sample_to_point(device_id: str, car_id: str | None, sample: TelemetrySample
     for key, value in fields.items():
         if value is not None:
             point = point.field(key, float(value))
+    for key, value in integer_fields.items():
+        if value is not None:
+            point = point.field(key, int(value))
 
     # 只標真 fresh fix（gps_fresh>=0.5）；None/0 不當 gps_fix，避免 50Hz 重複點
     if (

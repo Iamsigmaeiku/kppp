@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -22,6 +22,7 @@ GAP_MARK_SEC = 10.0
 HALL_MIN_R2 = 0.9
 # 速度量測最小 |v|，避免除零線性化
 _SPEED_EPS = 0.3
+SEGMENT_GAP_SEC = 2.0
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,9 @@ class SmoothInput:
     hdop: float | None = None
     speed_mps: float | None = None
     hall_hz: float | None = None
+    course_deg: float | None = None
+    h_acc_m: float | None = None
+    pps_age_ms: float | None = None
     # 若 False：此點只有時間（純 predict 步，用於補密度）；目前未強制使用
     has_position: bool = True
 
@@ -46,6 +50,9 @@ class SmoothOutput:
     speed_mps: float
     sigma_m: float
     gap: bool
+    vx_mps: float = 0.0
+    vy_mps: float = 0.0
+    pps_age_ms: float | None = None
 
 
 def theil_sen_slope(xs: np.ndarray, ys: np.ndarray) -> float:
@@ -162,6 +169,7 @@ def fixed_lag_commit(
     sigma_floor: float = 1.5,
     chi2_gate: float = CHI2_GATE_2DOF,
     gap_mark_sec: float = GAP_MARK_SEC,
+    model: str = "cv",
 ) -> list[SmoothOutput]:
     """餵入新 GPS → 對視窗跑 batch RTS → 只吐出已過 lag 且尚未 commit 的點。
 
@@ -194,15 +202,27 @@ def fixed_lag_commit(
     if state.last_commit_t is not None and t_commit <= state.last_commit_t:
         return []
 
-    smoothed = smooth_track(
-        state.samples,
-        q_accel=q_accel,
-        use_speed=use_speed,
-        hdop_scale=hdop_scale,
-        sigma_floor=sigma_floor,
-        chi2_gate=chi2_gate,
-        gap_mark_sec=gap_mark_sec,
-    )
+    if model == "ctrv":
+        smoothed = smooth_track_ctrv(
+            state.samples,
+            q_accel=q_accel,
+            hdop_scale=hdop_scale,
+            sigma_floor=sigma_floor,
+            chi2_gate=chi2_gate,
+            gap_mark_sec=gap_mark_sec,
+        )
+    elif model == "cv":
+        smoothed = smooth_track(
+            state.samples,
+            q_accel=q_accel,
+            use_speed=use_speed,
+            hdop_scale=hdop_scale,
+            sigma_floor=sigma_floor,
+            chi2_gate=chi2_gate,
+            gap_mark_sec=gap_mark_sec,
+        )
+    else:
+        raise ValueError(f"unsupported smoother model: {model}")
     out: list[SmoothOutput] = []
     for o in smoothed:
         if o.t > t_commit:
@@ -215,6 +235,267 @@ def fixed_lag_commit(
     return out
 
 
+def _wrap_angle(value: float) -> float:
+    return (value + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _split_on_time_gaps(
+    samples: list[SmoothInput], threshold_sec: float
+) -> list[list[SmoothInput]]:
+    if not samples:
+        return []
+    chunks: list[list[SmoothInput]] = [[samples[0]]]
+    for sample in samples[1:]:
+        dt = (sample.t - chunks[-1][-1].t).total_seconds()
+        if dt > threshold_sec:
+            chunks.append([sample])
+        else:
+            chunks[-1].append(sample)
+    return chunks
+
+
+def _ctrv_transition(x: np.ndarray, dt: float) -> np.ndarray:
+    """State [east, north, speed, math-heading, yaw-rate]."""
+    px, py, speed, heading, omega = (float(v) for v in x)
+    dt = max(float(dt), 1e-3)
+    if abs(omega) > 1e-5:
+        next_heading = heading + omega * dt
+        px += speed / omega * (math.sin(next_heading) - math.sin(heading))
+        py += speed / omega * (-math.cos(next_heading) + math.cos(heading))
+    else:
+        px += speed * math.cos(heading) * dt
+        py += speed * math.sin(heading) * dt
+        next_heading = heading + omega * dt
+    return np.array([px, py, speed, _wrap_angle(next_heading), omega], dtype=float)
+
+
+def _numeric_jacobian(x: np.ndarray, dt: float) -> np.ndarray:
+    base = _ctrv_transition(x, dt)
+    out = np.zeros((5, 5), dtype=float)
+    steps = (1e-4, 1e-4, 1e-4, 1e-6, 1e-6)
+    for column, step in enumerate(steps):
+        moved = x.copy()
+        moved[column] += step
+        diff = _ctrv_transition(moved, dt) - base
+        diff[3] = _wrap_angle(float(diff[3]))
+        out[:, column] = diff / step
+    return out
+
+
+def _ctrv_measurement_update(
+    x: np.ndarray,
+    P: np.ndarray,
+    sample: SmoothInput,
+    *,
+    hdop_scale: float,
+    sigma_floor: float,
+    chi2_gate: float,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    sigma = (
+        max(sigma_floor, sample.h_acc_m)
+        if sample.h_acc_m is not None and sample.h_acc_m > 0
+        else _gps_sigma(sample.hdop, hdop_scale=hdop_scale, sigma_floor=sigma_floor)
+    )
+    H = np.zeros((2, 5), dtype=float)
+    H[0, 0], H[1, 1] = 1.0, 1.0
+    innovation = np.array([sample.x_m - x[0], sample.y_m - x[1]], dtype=float)
+    R = np.diag([sigma * sigma, sigma * sigma])
+    S = H @ P @ H.T + R
+    S_inv = np.linalg.pinv(S)
+    if float(innovation.T @ S_inv @ innovation) > chi2_gate:
+        return x, P, False
+    K = P @ H.T @ S_inv
+    x = x + K @ innovation
+    I = np.eye(5)
+    P = (I - K @ H) @ P @ (I - K @ H).T + K @ R @ K.T
+
+    if sample.speed_mps is not None and sample.speed_mps >= 0:
+        Hs = np.zeros((1, 5), dtype=float)
+        Hs[0, 2] = 1.0
+        residual = np.array([float(sample.speed_mps) - x[2]])
+        Ss = Hs @ P @ Hs.T + np.array([[1.0]])
+        Ks = P @ Hs.T @ np.linalg.pinv(Ss)
+        x = x + Ks @ residual
+        P = (I - Ks @ Hs) @ P @ (I - Ks @ Hs).T + Ks @ Ks.T
+    if sample.course_deg is not None and x[2] > 1.0:
+        measured_heading = math.radians(90.0 - float(sample.course_deg))
+        Hh = np.zeros((1, 5), dtype=float)
+        Hh[0, 3] = 1.0
+        residual = np.array([_wrap_angle(measured_heading - float(x[3]))])
+        heading_var = math.radians(12.0) ** 2
+        Sh = Hh @ P @ Hh.T + np.array([[heading_var]])
+        Kh = P @ Hh.T @ np.linalg.pinv(Sh)
+        x = x + Kh @ residual
+        x[3] = _wrap_angle(float(x[3]))
+        P = (I - Kh @ Hh) @ P @ (I - Kh @ Hh).T + Kh * heading_var @ Kh.T
+    P = (P + P.T) * 0.5
+    return x, P, True
+
+
+def smooth_track_ctrv(
+    samples: list[SmoothInput],
+    *,
+    q_accel: float = 3.0,
+    q_yaw_accel: float = 0.8,
+    hdop_scale: float = 2.5,
+    sigma_floor: float = 1.5,
+    chi2_gate: float = CHI2_GATE_2DOF,
+    gap_mark_sec: float = GAP_MARK_SEC,
+    segment_gap_sec: float = SEGMENT_GAP_SEC,
+) -> list[SmoothOutput]:
+    """Coordinated-turn EKF + nonlinear RTS smoother.
+
+    This is separately selectable from the legacy CV model.  It remains
+    unconstrained and does not turn a prediction through a long gap into a
+    measurement.
+    """
+    if not samples:
+        return []
+    chunks = _split_on_time_gaps(samples, segment_gap_sec)
+    if len(chunks) > 1:
+        joined: list[SmoothOutput] = []
+        for index, chunk in enumerate(chunks):
+            part = smooth_track_ctrv(
+                chunk,
+                q_accel=q_accel,
+                q_yaw_accel=q_yaw_accel,
+                hdop_scale=hdop_scale,
+                sigma_floor=sigma_floor,
+                chi2_gate=chi2_gate,
+                gap_mark_sec=gap_mark_sec,
+                segment_gap_sec=float("inf"),
+            )
+            if part:
+                if index > 0:
+                    part[0] = replace(part[0], gap=True)
+                if index < len(chunks) - 1:
+                    part[-1] = replace(part[-1], gap=True)
+            joined.extend(part)
+        return joined
+    n = len(samples)
+    if samples[0].course_deg is not None:
+        heading0 = math.radians(90.0 - float(samples[0].course_deg))
+    elif n >= 2:
+        heading0 = math.atan2(
+            samples[1].y_m - samples[0].y_m,
+            samples[1].x_m - samples[0].x_m,
+        )
+    else:
+        heading0 = 0.0
+    speed0 = float(samples[0].speed_mps or 0.0)
+    x = np.array([samples[0].x_m, samples[0].y_m, speed0, heading0, 0.0])
+    sigma0 = _gps_sigma(
+        samples[0].hdop, hdop_scale=hdop_scale, sigma_floor=sigma_floor
+    )
+    P = np.diag([sigma0**2, sigma0**2, 25.0, math.pi**2, 1.0])
+    filtered = np.zeros((n, 5))
+    covariances = np.zeros((n, 5, 5))
+    predicted = np.zeros((n, 5))
+    predicted_cov = np.zeros((n, 5, 5))
+    transitions = np.repeat(np.eye(5)[None, :, :], n, axis=0)
+    no_position = np.zeros(n, dtype=bool)
+
+    if samples[0].has_position:
+        x, P, _ = _ctrv_measurement_update(
+            x,
+            P,
+            samples[0],
+            hdop_scale=hdop_scale,
+            sigma_floor=sigma_floor,
+            chi2_gate=chi2_gate,
+        )
+    else:
+        no_position[0] = True
+    filtered[0], covariances[0] = x, P
+    predicted[0], predicted_cov[0] = x, P
+
+    for i in range(1, n):
+        dt = max((samples[i].t - samples[i - 1].t).total_seconds(), 1e-3)
+        F = _numeric_jacobian(x, dt)
+        Q = np.diag(
+            [
+                0.25 * q_accel**2 * dt**4,
+                0.25 * q_accel**2 * dt**4,
+                q_accel**2 * dt**2,
+                0.25 * q_yaw_accel**2 * dt**4,
+                q_yaw_accel**2 * dt**2,
+            ]
+        )
+        x = _ctrv_transition(x, dt)
+        P = F @ P @ F.T + Q
+        transitions[i] = F
+        predicted[i], predicted_cov[i] = x, P
+        if samples[i].has_position:
+            x, P, _ = _ctrv_measurement_update(
+                x,
+                P,
+                samples[i],
+                hdop_scale=hdop_scale,
+                sigma_floor=sigma_floor,
+                chi2_gate=chi2_gate,
+            )
+        else:
+            no_position[i] = True
+        filtered[i], covariances[i] = x, P
+
+    smoothed = filtered.copy()
+    smooth_cov = covariances.copy()
+    for i in range(n - 2, -1, -1):
+        gain = (
+            covariances[i]
+            @ transitions[i + 1].T
+            @ np.linalg.pinv(predicted_cov[i + 1])
+        )
+        residual = smoothed[i + 1] - predicted[i + 1]
+        residual[3] = _wrap_angle(float(residual[3]))
+        smoothed[i] = filtered[i] + gain @ residual
+        smoothed[i, 3] = _wrap_angle(float(smoothed[i, 3]))
+        smooth_cov[i] = covariances[i] + gain @ (
+            smooth_cov[i + 1] - predicted_cov[i + 1]
+        ) @ gain.T
+        smooth_cov[i] = (smooth_cov[i] + smooth_cov[i].T) * 0.5
+
+    gap_flags = np.zeros(n, dtype=bool)
+    i = 0
+    while i < n:
+        if not no_position[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and no_position[j]:
+            j += 1
+        end = samples[j].t if j < n else samples[j - 1].t
+        if (end - samples[i].t).total_seconds() >= gap_mark_sec:
+            gap_flags[i:j] = True
+        i = j
+
+    outputs: list[SmoothOutput] = []
+    for i, state in enumerate(smoothed):
+        speed = max(0.0, float(state[2]))
+        vx = speed * math.cos(float(state[3]))
+        vy = speed * math.sin(float(state[3]))
+        lat, lon = local_m_to_latlng(float(state[0]), float(state[1]))
+        sigma = math.sqrt(
+            max(0.0, float(smooth_cov[i, 0, 0] + smooth_cov[i, 1, 1]))
+        )
+        outputs.append(
+            SmoothOutput(
+                t=samples[i].t,
+                lat=lat,
+                lon=lon,
+                x_m=float(state[0]),
+                y_m=float(state[1]),
+                speed_mps=speed,
+                sigma_m=sigma,
+                gap=bool(gap_flags[i]),
+                vx_mps=vx,
+                vy_mps=vy,
+                pps_age_ms=samples[i].pps_age_ms,
+            )
+        )
+    return outputs
+
+
 def smooth_track(
     samples: list[SmoothInput],
     *,
@@ -224,10 +505,32 @@ def smooth_track(
     sigma_floor: float = 1.5,
     chi2_gate: float = CHI2_GATE_2DOF,
     gap_mark_sec: float = GAP_MARK_SEC,
+    segment_gap_sec: float = SEGMENT_GAP_SEC,
 ) -> list[SmoothOutput]:
     """Forward KF + RTS backward；回傳與 samples 等長的平滑點。"""
     if not samples:
         return []
+    chunks = _split_on_time_gaps(samples, segment_gap_sec)
+    if len(chunks) > 1:
+        joined: list[SmoothOutput] = []
+        for index, chunk in enumerate(chunks):
+            part = smooth_track(
+                chunk,
+                q_accel=q_accel,
+                use_speed=use_speed,
+                hdop_scale=hdop_scale,
+                sigma_floor=sigma_floor,
+                chi2_gate=chi2_gate,
+                gap_mark_sec=gap_mark_sec,
+                segment_gap_sec=float("inf"),
+            )
+            if part:
+                if index > 0:
+                    part[0] = replace(part[0], gap=True)
+                if index < len(chunks) - 1:
+                    part[-1] = replace(part[-1], gap=True)
+            joined.extend(part)
+        return joined
 
     n = len(samples)
     # hall 尺度（整段一次）
@@ -337,6 +640,9 @@ def smooth_track(
                 speed_mps=speed,
                 sigma_m=sigma,
                 gap=bool(gap_flags[i]),
+                vx_mps=float(xi[2]),
+                vy_mps=float(xi[3]),
+                pps_age_ms=samples[i].pps_age_ms,
             )
         )
     return out

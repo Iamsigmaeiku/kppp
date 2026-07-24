@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from services.decoder_ingest.timebase_calibration import calibrate
+from services.decoder_ingest.timebase_calibration import align_lap_sequences, calibrate
 
 T0 = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -88,3 +88,15 @@ def test_too_few_events_failed_finite():
     assert r.quality == "failed"
     assert r.matched_pairs == 0
     assert math.isfinite(r.residual_std_sec)
+
+
+def test_dynamic_alignment_handles_internal_missing_and_duplicate():
+    import numpy as np
+
+    # decoder missed one event (100 s interval); GPS has a duplicate crossing
+    # (2 s + 48 s). Stable 50 s laps on both sides must still align.
+    d = np.array([50.0, 50.0, 100.0, 50.0, 50.0])
+    g = np.array([50.0, 50.0, 2.0, 48.0, 50.0, 50.0, 50.0])
+    pairs = align_lap_sequences(d, g)
+    assert len(pairs) >= 4
+    assert all(abs(d[i] - g[j]) <= 8.0 for i, j in pairs)

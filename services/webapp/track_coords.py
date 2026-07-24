@@ -7,6 +7,7 @@ served at /webapp-static/tracks/tks_qiaotou_track.png.
 from __future__ import annotations
 
 import math
+import os
 
 CENTER_LAT = 22.742304850060208
 CENTER_LNG = 120.32173316061305
@@ -25,6 +26,16 @@ START_GATE_B_M = (67.441, -9.7767)  # 外側
 GATE_FORWARD_BEARING_DEG = 0.0  # 0° = +y 北
 GATE_HALF_WIDTH_M = 22.0
 
+_WGS84_A = 6378137.0
+_WGS84_F = 1.0 / 298.257223563
+_WGS84_E2 = _WGS84_F * (2.0 - _WGS84_F)
+USE_WGS84_ENU = os.getenv("TRACK_USE_WGS84_ENU", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 
 def px_to_local_m(px: float, py: float) -> tuple[float, float]:
     dx_px = px - CENTER_PX[0]
@@ -40,16 +51,113 @@ def local_m_to_px(x_m: float, y_m: float) -> tuple[float, float]:
     return px, py
 
 
-def local_m_to_latlng(x_m: float, y_m: float) -> tuple[float, float]:
+def _geodetic_to_ecef(lat: float, lng: float, alt_m: float = 0.0) -> tuple[float, float, float]:
+    phi = math.radians(lat)
+    lam = math.radians(lng)
+    sin_phi, cos_phi = math.sin(phi), math.cos(phi)
+    n = _WGS84_A / math.sqrt(1.0 - _WGS84_E2 * sin_phi * sin_phi)
+    return (
+        (n + alt_m) * cos_phi * math.cos(lam),
+        (n + alt_m) * cos_phi * math.sin(lam),
+        (n * (1.0 - _WGS84_E2) + alt_m) * sin_phi,
+    )
+
+
+def _ecef_to_geodetic(x: float, y: float, z: float) -> tuple[float, float, float]:
+    lng = math.atan2(y, x)
+    p = math.hypot(x, y)
+    lat = math.atan2(z, p * (1.0 - _WGS84_E2))
+    alt = 0.0
+    for _ in range(10):
+        sin_lat = math.sin(lat)
+        n = _WGS84_A / math.sqrt(1.0 - _WGS84_E2 * sin_lat * sin_lat)
+        alt = p / max(math.cos(lat), 1e-15) - n
+        next_lat = math.atan2(z, p * (1.0 - _WGS84_E2 * n / (n + alt)))
+        if abs(next_lat - lat) < 1e-13:
+            lat = next_lat
+            break
+        lat = next_lat
+    return math.degrees(lat), math.degrees(lng), alt
+
+
+def wgs84_to_enu(
+    lat: float,
+    lng: float,
+    alt_m: float = 0.0,
+    *,
+    origin_lat: float = CENTER_LAT,
+    origin_lng: float = CENTER_LNG,
+    origin_alt_m: float = 0.0,
+) -> tuple[float, float, float]:
+    """Convert WGS84 geodetic coordinates to a local east/north/up frame."""
+    x, y, z = _geodetic_to_ecef(lat, lng, alt_m)
+    x0, y0, z0 = _geodetic_to_ecef(origin_lat, origin_lng, origin_alt_m)
+    dx, dy, dz = x - x0, y - y0, z - z0
+    phi, lam = math.radians(origin_lat), math.radians(origin_lng)
+    east = -math.sin(lam) * dx + math.cos(lam) * dy
+    north = (
+        -math.sin(phi) * math.cos(lam) * dx
+        - math.sin(phi) * math.sin(lam) * dy
+        + math.cos(phi) * dz
+    )
+    up = (
+        math.cos(phi) * math.cos(lam) * dx
+        + math.cos(phi) * math.sin(lam) * dy
+        + math.sin(phi) * dz
+    )
+    return east, north, up
+
+
+def enu_to_wgs84(
+    east_m: float,
+    north_m: float,
+    up_m: float = 0.0,
+    *,
+    origin_lat: float = CENTER_LAT,
+    origin_lng: float = CENTER_LNG,
+    origin_alt_m: float = 0.0,
+) -> tuple[float, float, float]:
+    """Convert local east/north/up coordinates back to WGS84."""
+    phi, lam = math.radians(origin_lat), math.radians(origin_lng)
+    dx = (
+        -math.sin(lam) * east_m
+        - math.sin(phi) * math.cos(lam) * north_m
+        + math.cos(phi) * math.cos(lam) * up_m
+    )
+    dy = (
+        math.cos(lam) * east_m
+        - math.sin(phi) * math.sin(lam) * north_m
+        + math.cos(phi) * math.sin(lam) * up_m
+    )
+    dz = math.cos(phi) * north_m + math.sin(phi) * up_m
+    x0, y0, z0 = _geodetic_to_ecef(origin_lat, origin_lng, origin_alt_m)
+    return _ecef_to_geodetic(x0 + dx, y0 + dy, z0 + dz)
+
+
+def _legacy_local_m_to_latlng(x_m: float, y_m: float) -> tuple[float, float]:
     lat = CENTER_LAT + (y_m / 111320.0)
     lng = CENTER_LNG + (x_m / (111320.0 * math.cos(math.radians(CENTER_LAT))))
     return lat, lng
 
 
-def latlng_to_local_m(lat: float, lng: float) -> tuple[float, float]:
+def _legacy_latlng_to_local_m(lat: float, lng: float) -> tuple[float, float]:
     y_m = (lat - CENTER_LAT) * 111320.0
     x_m = (lng - CENTER_LNG) * (111320.0 * math.cos(math.radians(CENTER_LAT)))
     return x_m, y_m
+
+
+def local_m_to_latlng(x_m: float, y_m: float) -> tuple[float, float]:
+    if USE_WGS84_ENU:
+        lat, lng, _ = enu_to_wgs84(x_m, y_m)
+        return lat, lng
+    return _legacy_local_m_to_latlng(x_m, y_m)
+
+
+def latlng_to_local_m(lat: float, lng: float) -> tuple[float, float]:
+    if USE_WGS84_ENU:
+        east, north, _ = wgs84_to_enu(lat, lng)
+        return east, north
+    return _legacy_latlng_to_local_m(lat, lng)
 
 
 def latlng_to_px(lat: float, lng: float) -> tuple[float, float]:

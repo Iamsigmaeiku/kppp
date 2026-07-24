@@ -1,0 +1,312 @@
+{
+  "schema_version": 2,
+  "session_id": "sess-20260723-054723",
+  "data_evidence": {
+    "row_count": 20954,
+    "source_counts": {
+      "kart_telemetry": 13582,
+      "dr_position": 7337,
+      "decoder_raw_events": 35
+    },
+    "v2_gps_points": 0,
+    "legacy_gps_points": 5263
+  },
+  "gps_sampling": {
+    "points": 5263,
+    "accepted": 5263,
+    "rejected": 0,
+    "actual_rate_hz": 10.0,
+    "interval_ms": {
+      "count": 5262,
+      "min": 99.999744,
+      "p50": 100.0,
+      "p95": 700.0,
+      "p99": 5285.729832960003,
+      "max": 19846.000128
+    },
+    "gaps_over_1s": 74,
+    "gaps_over_2s": 73,
+    "max_gap_sec": 19.846000128,
+    "nominal_period_ms": null
+  },
+  "itow": {
+    "missing_epochs": 0,
+    "duplicates": 0,
+    "backwards": 0,
+    "week_wraps": 0
+  },
+  "packet_sequence": {
+    "missing": 0,
+    "duplicates": 0,
+    "backwards": 0
+  },
+  "transport_counters": {
+    "crc_errors": 0,
+    "gps_queue_drops": 0,
+    "queue_drops": 0,
+    "ring_drops": 0,
+    "gps_ring_drops": 0,
+    "server_queue_drops": 0,
+    "influx_write_failures": 0,
+    "gps_uart_overflows": 0,
+    "gps_parser_errors": 0
+  },
+  "quality": {
+    "fix_type": {
+      "None": 5263
+    },
+    "num_sv": {
+      "count": 5263,
+      "min": 7.0,
+      "p50": 12.0,
+      "p95": 14.0,
+      "p99": 16.0,
+      "max": 16.0
+    },
+    "h_acc_m": {
+      "count": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null
+    },
+    "t_acc_ns": {
+      "count": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null
+    },
+    "reject_reasons": {}
+  },
+  "imu": {
+    "icm42688": {
+      "points": 378,
+      "interval_ms": {
+        "count": 377,
+        "min": 1850.377216,
+        "p50": 2004.658944,
+        "p95": 3831.2460287999975,
+        "p99": 21822.71906816005,
+        "max": 64853.415936
+      },
+      "acceleration_g": {
+        "x": {
+          "count": 378,
+          "min": -7.8583984375,
+          "p50": -0.07080078125,
+          "p95": 2.220458984374998,
+          "p99": 4.075893554687521,
+          "max": 8.1904296875
+        },
+        "y": {
+          "count": 378,
+          "min": -4.9736328125,
+          "p50": -0.02587890625,
+          "p95": 2.951660156249998,
+          "p99": 5.41726562500001,
+          "max": 10.615234375
+        },
+        "z": {
+          "count": 378,
+          "min": -15.9990234375,
+          "p50": 1.02392578125,
+          "p95": 11.026806640624999,
+          "p99": 15.99951171875,
+          "max": 15.99951171875
+        },
+        "norm": {
+          "count": 378,
+          "min": 0.1686727276242056,
+          "p50": 1.776000326416091,
+          "p95": 15.750578187984457,
+          "p99": 16.852152374892327,
+          "max": 19.20060630278141
+        }
+      }
+    },
+    "mpu6050": {
+      "points": 236,
+      "interval_ms": {
+        "count": 235,
+        "min": 1850.002176,
+        "p50": 2004.947968,
+        "p95": 3594.013055999965,
+        "p99": 36894.29239295993,
+        "max": 70788.214784
+      },
+      "acceleration_g": {
+        "x": {
+          "count": 236,
+          "min": -1.64111328125,
+          "p50": -0.1591796875,
+          "p95": 0.2445068359375,
+          "p99": 0.5136474609375,
+          "max": 1.09228515625
+        },
+        "y": {
+          "count": 236,
+          "min": -2.3564453125,
+          "p50": -0.12548828125,
+          "p95": 1.2901611328125,
+          "p99": 2.2852783203125,
+          "max": 4.3798828125
+        },
+        "z": {
+          "count": 236,
+          "min": -1.5009765625,
+          "p50": -0.870361328125,
+          "p95": 0.6865234375,
+          "p99": 4.723315429687503,
+          "max": 6.32861328125
+        },
+        "norm": {
+          "count": 236,
+          "min": 0.18706780531344788,
+          "p50": 0.9283921929628498,
+          "p95": 2.259727545430372,
+          "p99": 4.8668353340487345,
+          "max": 6.493552109288719
+        }
+      }
+    },
+    "note": "Influx ingest is downsampled; interval statistics are storage cadence, not sensor ODR."
+  },
+  "decoder": {
+    "passing_rows": 35,
+    "by_transponder": {
+      "140210997B77": {
+        "passings": 12,
+        "tick_intervals": 11,
+        "tick_wraps": 0,
+        "implied_tick_hz_from_tcp_time": {
+          "count": 11,
+          "min": 255867.16601003482,
+          "p50": 256025.56490451712,
+          "p95": 256489.67428632377,
+          "p99": 256807.87795485588,
+          "max": 256887.4288719889
+        }
+      },
+      "140211241C77": {
+        "passings": 11,
+        "tick_intervals": 10,
+        "tick_wraps": 0,
+        "implied_tick_hz_from_tcp_time": {
+          "count": 10,
+          "min": 255928.82979793573,
+          "p50": 256016.73648932128,
+          "p95": 256592.59345320697,
+          "p99": 256944.330715632,
+          "max": 257032.26503123826
+        }
+      },
+      "140210A5F077": {
+        "passings": 12,
+        "tick_intervals": 11,
+        "tick_wraps": 0,
+        "implied_tick_hz_from_tcp_time": {
+          "count": 11,
+          "min": 255820.39731094628,
+          "p50": 256018.02844091167,
+          "p95": 256527.13057593146,
+          "p99": 256862.4295271299,
+          "max": 256946.2542649295
+        }
+      }
+    },
+    "tick_hz_configured_assumption": 256000.0,
+    "note": "TCP-derived frequency is diagnostic only; validate on long clean captures."
+  },
+  "kinematics": {
+    "implied_speed_mps": {
+      "count": 5262,
+      "min": 0.0,
+      "p50": 8.952684597565103,
+      "p95": 16.472306456273454,
+      "p99": 17.2889418766744,
+      "max": 28.488089768222718
+    },
+    "implied_acceleration_mps2": {
+      "count": 5261,
+      "min": -186.17985159139982,
+      "p50": 0.004634927402746014,
+      "p95": 4.922821031166134,
+      "p99": 12.94473801593448,
+      "max": 170.30217933408923
+    },
+    "implied_yaw_rate_dps": {
+      "count": 5262,
+      "min": -1650.2380999999996,
+      "p50": 0.0,
+      "p95": 48.72466787587361,
+      "p99": 138.2986607935884,
+      "max": 1630.5012740832617
+    }
+  },
+  "position_comparison": {
+    "esp32_fused_vs_raw": {
+      "points": 7337,
+      "paired_with_accepted_raw": 5511,
+      "separation_m": {
+        "count": 5511,
+        "min": 0.03335847798380254,
+        "p50": 3.823732809415455,
+        "p95": 41.52029426242661,
+        "p99": 53.44084617472308,
+        "max": 63.9956256921657
+      },
+      "note": "Separation from raw GPS is consistency evidence, not absolute accuracy."
+    },
+    "track_smoothed_vs_raw": {
+      "points": 0,
+      "paired_with_accepted_raw": 0,
+      "separation_m": {
+        "count": 0,
+        "min": null,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null
+      },
+      "note": "Separation from raw GPS is consistency evidence, not absolute accuracy."
+    }
+  },
+  "gaps": [
+    {
+      "class": "UNRESOLVED",
+      "candidates": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "J",
+        "K"
+      ],
+      "count": 73,
+      "max_gap_sec": 19.846000128,
+      "evidence": "receive/storage timestamp gap without iTOW, sequence or layer counters; legacy evidence cannot select one A-K class"
+    }
+  ],
+  "gap_class_legend": {
+    "A": "GNSS did not produce NAV-PVT",
+    "B": "ESP32 UART/parser loss",
+    "C": "FreeRTOS queue full",
+    "D": "ring buffer loss",
+    "E": "UDP/network loss",
+    "F": "server queue drop",
+    "G": "Influx write failure",
+    "H": "quality gate rejection",
+    "I": "jump-filter reset/re-anchor discontinuity",
+    "J": "query/fallback/render layer omission",
+    "K": "session boundary or timestamp error"
+  },
+  "limitations": [
+    "Legacy capture lacks fields required for layer-exact attribution: gps_itow_ms, gps_packet_seq, sensor_time_us, gnss_time_ns, receive_time_ns"
+  ]
+}

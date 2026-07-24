@@ -12,6 +12,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <esp_timer.h>
 #include <esp_task_wdt.h>
 #include <math.h>
 #include <string.h>
@@ -41,8 +42,27 @@ static constexpr uint32_t FUSED_PERIOD_US = 20000;  // 50 Hz
 // 雙 ring：GPS 永不被 IMU 擠掉；滿了只清 imuRing
 static constexpr size_t kGpsRingCap = 12288;   // ~10Hz×20s GPS frames
 static constexpr size_t kImuRingCap = 16384;
-static constexpr size_t kBatchMtu = 1400;
+#ifndef KPP_HTTP_BATCH_BYTES
+#define KPP_HTTP_BATCH_BYTES 16384
+#endif
+#if TELEMETRY_USE_HTTP
+static constexpr size_t kBatchBytes = KPP_HTTP_BATCH_BYTES;
+#else
+static constexpr size_t kBatchBytes = 1400;
+#endif
+#ifndef KPP_HTTP_FLUSH_MS
+#define KPP_HTTP_FLUSH_MS 100
+#endif
+#if TELEMETRY_USE_HTTP
+static constexpr uint32_t kFlushMs = KPP_HTTP_FLUSH_MS;
+#else
 static constexpr uint32_t kFlushMs = 20;
+#endif
+
+/* Roll back scheduler behavior independently if field testing finds a regression. */
+#ifndef KPP_LEGACY_TASK_PRIORITIES
+#define KPP_LEGACY_TASK_PRIORITIES 0
+#endif
 
 /** Dual-IMU blend: ICM dominates (lower noise density). */
 #ifndef DUAL_IMU_W_ICM
@@ -50,6 +70,27 @@ static constexpr uint32_t kFlushMs = 20;
 #endif
 #ifndef DUAL_IMU_W_MPU
 #define DUAL_IMU_W_MPU 0.15f
+#endif
+/* Legacy fixed blend rollback. Default uses ICM only and MPU only on failover. */
+#ifndef DUAL_IMU_FIXED_BLEND_ENABLE
+#define DUAL_IMU_FIXED_BLEND_ENABLE 0
+#endif
+/* Measured installation: sensor +Y points up, +X longitudinal, +Z lateral. */
+#ifndef IMU_MOUNT_Y_UP
+#define IMU_MOUNT_Y_UP 1
+#endif
+
+/* Roll back with -DKPP_GPS_PACKET_V2=0 without changing the frame type. */
+#ifndef KPP_GPS_PACKET_V2
+#define KPP_GPS_PACKET_V2 1
+#endif
+
+/* Explicitly set to an unused ESP32-S3 input pin after wiring TIMEPULSE. */
+#ifndef GNSS_PPS_PIN
+#define GNSS_PPS_PIN -1
+#endif
+#ifndef GNSS_PPS_EDGE_FALLING
+#define GNSS_PPS_EDGE_FALLING 1
 #endif
 /** Consistency gates (phys units, after bias). */
 #ifndef DUAL_IMU_GYRO_MAX_RPS
@@ -67,6 +108,8 @@ static GpsImuEskf eskf;
 
 #if TELEMETRY_USE_HTTP
 static WiFiClientSecure tls;
+static HTTPClient telemetryHttp;
+static bool telemetryHttpBegun = false;
 #else
 static WiFiUDP udp;
 #endif
@@ -94,12 +137,26 @@ static QueueHandle_t mpuQ = nullptr;
 static QueueHandle_t gpsQ = nullptr;
 
 static volatile uint32_t g_tx_imu = 0, g_tx_mpu = 0, g_tx_gps = 0, g_tx_fused = 0;
+static uint32_t g_gps_packet_seq = 0;
 static volatile uint8_t g_last_gps_fix = 0, g_last_gps_sv = 0;
-static volatile uint32_t g_drop_imu = 0, g_drop_mpu = 0, g_ring_drop = 0;
+static volatile uint32_t g_drop_imu = 0, g_drop_mpu = 0, g_drop_gps = 0, g_ring_drop = 0;
 static volatile uint32_t g_gps_ring_drop = 0;  // 僅 gpsRing 真的滿到不得不丟最舊 GPS
+static portMUX_TYPE g_pps_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint64_t g_pps_time_us = 0;
+static volatile uint32_t g_pps_seq = 0;
+
+static void IRAM_ATTR onGnssPps() {
+  const uint64_t now = (uint64_t)esp_timer_get_time();
+  portENTER_CRITICAL_ISR(&g_pps_mux);
+  g_pps_time_us = now;
+  g_pps_seq++;
+  portEXIT_CRITICAL_ISR(&g_pps_mux);
+}
 static volatile uint32_t g_up_bytes = 0, g_up_fail = 0;
 static volatile int g_last_http_code = 0;
 static volatile bool g_imu_fault = false;
+static volatile bool g_mpu_active = false;
+static volatile bool g_mpu_rejected = false;
 static volatile bool g_mpu_ok = false;
 static volatile bool g_icm_ok = false;
 static volatile bool g_wifi_ok = false;
@@ -265,16 +322,23 @@ static void ensureWifi() {
 static bool sendBatchHttp(const uint8_t *data, size_t n, int *out_code) {
   if (n == 0) return false;
   if (out_code) *out_code = -1;
-  tls.setInsecure();
-  HTTPClient http;
-  if (!http.begin(tls, INGEST_FRAME_URL)) {
-    return false;
+  if (!telemetryHttpBegun) {
+    tls.setInsecure();
+    if (!telemetryHttp.begin(tls, INGEST_FRAME_URL)) {
+      return false;
+    }
+    telemetryHttp.setReuse(true);
+    telemetryHttp.useHTTP10(false);
+    telemetryHttp.setTimeout(4000);
+    telemetryHttpBegun = true;
   }
-  http.setTimeout(4000);
-  http.addHeader("Content-Type", "application/octet-stream");
-  http.addHeader("Authorization", "Bearer " INGEST_TOKEN);
-  const int code = http.POST((uint8_t *)data, n);
-  http.end();
+  telemetryHttp.addHeader("Content-Type", "application/octet-stream", true);
+  telemetryHttp.addHeader("Authorization", "Bearer " INGEST_TOKEN, true);
+  const int code = telemetryHttp.POST((uint8_t *)data, n);
+  if (code < 0) {
+    telemetryHttp.end();
+    telemetryHttpBegun = false;
+  }
   if (out_code) *out_code = code;
   return code >= 200 && code < 300;
 }
@@ -375,6 +439,7 @@ static void sensorTask(void *) {
         GpsMsg dump;
         xQueueReceive(gpsQ, &dump, 0);
         xQueueSend(gpsQ, &gm, 0);
+        g_drop_gps++;
       }
     }
   }
@@ -386,14 +451,25 @@ static int16_t sat_i16(float v) {
   return (int16_t)v;
 }
 
+static void sensorToBody(float &x, float &y, float &z) {
+#if IMU_MOUNT_Y_UP
+  // Proper right-handed rotation: sensor (X,Y,Z) -> body (X,Z,-Y).
+  const float sy = y;
+  y = z;
+  z = -sy;
+#endif
+}
+
 static void updateMpuBias(const MpuSample &s) {
   if (g_mpu_bias_ready) return;
-  const float ax = s.ax / Mpu6050::kAccelSens;
-  const float ay = s.ay / Mpu6050::kAccelSens;
-  const float az = s.az / Mpu6050::kAccelSens;
-  const float gx = (s.gx / Mpu6050::kGyroSens) * (PI / 180.0f);
-  const float gy = (s.gy / Mpu6050::kGyroSens) * (PI / 180.0f);
-  const float gz = (s.gz / Mpu6050::kGyroSens) * (PI / 180.0f);
+  float ax = s.ax / Mpu6050::kAccelSens;
+  float ay = s.ay / Mpu6050::kAccelSens;
+  float az = s.az / Mpu6050::kAccelSens;
+  float gx = (s.gx / Mpu6050::kGyroSens) * (PI / 180.0f);
+  float gy = (s.gy / Mpu6050::kGyroSens) * (PI / 180.0f);
+  float gz = (s.gz / Mpu6050::kGyroSens) * (PI / 180.0f);
+  sensorToBody(ax, ay, az);
+  sensorToBody(gx, gy, gz);
   if (g_mpu_bias_n == 0) g_mpu_bias_t0 = s.ts_us;
   g_mpu_bg_sum[0] += gx;
   g_mpu_bg_sum[1] += gy;
@@ -407,6 +483,9 @@ static void updateMpuBias(const MpuSample &s) {
       g_mpu_bg[i] = (float)(g_mpu_bg_sum[i] / (double)g_mpu_bias_n);
       g_mpu_ba[i] = (float)(g_mpu_ba_sum[i] / (double)g_mpu_bias_n);
     }
+    // At rest in body x-forward/y-right/z-down, specific force is [0,0,-1g].
+    // Subtract only sensor bias, never the gravity vector itself.
+    g_mpu_ba[2] += 1.0f;
     g_mpu_bias_ready = true;
     Serial.printf("[mpu] bias ready n=%u bg=%.4f,%.4f,%.4f\n",
                   (unsigned)g_mpu_bias_n, g_mpu_bg[0], g_mpu_bg[1], g_mpu_bg[2]);
@@ -431,12 +510,14 @@ static void fusionTxTask(void *) {
     while (xQueueReceive(mpuQ, &mm, 0) == pdTRUE) {
       did_work = true;
       updateMpuBias(mm.s);
-      const float ax = mm.s.ax / Mpu6050::kAccelSens;
-      const float ay = mm.s.ay / Mpu6050::kAccelSens;
-      const float az = mm.s.az / Mpu6050::kAccelSens;
-      const float gx = (mm.s.gx / Mpu6050::kGyroSens) * (PI / 180.0f);
-      const float gy = (mm.s.gy / Mpu6050::kGyroSens) * (PI / 180.0f);
-      const float gz = (mm.s.gz / Mpu6050::kGyroSens) * (PI / 180.0f);
+      float ax = mm.s.ax / Mpu6050::kAccelSens;
+      float ay = mm.s.ay / Mpu6050::kAccelSens;
+      float az = mm.s.az / Mpu6050::kAccelSens;
+      float gx = (mm.s.gx / Mpu6050::kGyroSens) * (PI / 180.0f);
+      float gy = (mm.s.gy / Mpu6050::kGyroSens) * (PI / 180.0f);
+      float gz = (mm.s.gz / Mpu6050::kGyroSens) * (PI / 180.0f);
+      sensorToBody(ax, ay, az);
+      sensorToBody(gx, gy, gz);
       if (g_mpu_bias_ready) {
         mpu_ax = ax - g_mpu_ba[0];
         mpu_ay = ay - g_mpu_ba[1];
@@ -466,6 +547,8 @@ static void fusionTxTask(void *) {
         in.gz_rps = mpu_gz;
         eskf.onImu(in);
         g_imu_fault = true;
+        g_mpu_active = true;
+        g_mpu_rejected = false;
       }
 
       if (mpu_acc_n < KPP_IMU_MAX_SAMPLES) {
@@ -496,6 +579,8 @@ static void fusionTxTask(void *) {
       float gx = (im.s.gx / Icm42688Fifo::kGyroSens) * (PI / 180.0f);
       float gy = (im.s.gy / Icm42688Fifo::kGyroSens) * (PI / 180.0f);
       float gz = (im.s.gz / Icm42688Fifo::kGyroSens) * (PI / 180.0f);
+      sensorToBody(ax, ay, az);
+      sensorToBody(gx, gy, gz);
 
       bool fault = false;
       if (have_mpu && g_mpu_bias_ready &&
@@ -516,14 +601,24 @@ static void fusionTxTask(void *) {
                                (icm_az - mpu_az) * (icm_az - mpu_az));
         fault = (dg > DUAL_IMU_GYRO_MAX_RPS) || (da > DUAL_IMU_ACCEL_MAX_G);
 
-        const float wi = DUAL_IMU_W_ICM;
-        const float wm = DUAL_IMU_W_MPU;
-        ax = wi * icm_ax + wm * mpu_ax + eo.ba[0];
-        ay = wi * icm_ay + wm * mpu_ay + eo.ba[1];
-        az = wi * icm_az + wm * mpu_az + eo.ba[2];
-        gx = wi * icm_gx + wm * mpu_gx + eo.bg[0];
-        gy = wi * icm_gy + wm * mpu_gy + eo.bg[1];
-        gz = wi * icm_gz + wm * mpu_gz + eo.bg[2];
+#if DUAL_IMU_FIXED_BLEND_ENABLE
+        if (!fault) {
+          const float wi = DUAL_IMU_W_ICM;
+          const float wm = DUAL_IMU_W_MPU;
+          ax = wi * icm_ax + wm * mpu_ax + eo.ba[0];
+          ay = wi * icm_ay + wm * mpu_ay + eo.ba[1];
+          az = wi * icm_az + wm * mpu_az + eo.ba[2];
+          gx = wi * icm_gx + wm * mpu_gx + eo.bg[0];
+          gy = wi * icm_gy + wm * mpu_gy + eo.bg[1];
+          gz = wi * icm_gz + wm * mpu_gz + eo.bg[2];
+          g_mpu_active = true;
+        }
+#else
+        // Until per-sensor Allan/noise covariance is calibrated, mixing the
+        // noisier MPU into every ICM sample adds no defensible information.
+        g_mpu_active = false;
+#endif
+        g_mpu_rejected = fault;
       }
       g_imu_fault = fault;
 
@@ -586,6 +681,46 @@ static void fusionTxTask(void *) {
       gin.num_sv = gm.p.num_sv;
       eskf.onGps(gin);
 
+ #if KPP_GPS_PACKET_V2
+      KppGpsPayloadV2 gp{};
+      gp.version = KPP_GPS_PAYLOAD_VERSION_2;
+      gp.valid = gm.p.valid_flags;
+      gp.year = gm.p.year;
+      gp.month = gm.p.month;
+      gp.day = gm.p.day;
+      gp.hour = gm.p.hour;
+      gp.minute = gm.p.minute;
+      gp.second = gm.p.second;
+      gp.fix_type = gm.p.fix_type;
+      gp.num_sv = gm.p.num_sv;
+      gp.flags = gm.p.flags;
+      gp.flags2 = gm.p.flags2;
+      gp.nano = gm.p.nano;
+      gp.itow = gm.p.itow;
+      gp.t_acc = gm.p.t_acc;
+      gp.h_acc = gm.p.h_acc;
+      gp.v_acc = gm.p.v_acc;
+      gp.s_acc = gm.p.s_acc;
+      gp.head_acc = gm.p.head_acc;
+      gp.lat = gm.p.lat;
+      gp.lon = gm.p.lon;
+      gp.height = gm.p.height;
+      gp.vel_n = gm.p.vel_n;
+      gp.vel_e = gm.p.vel_e;
+      gp.vel_d = gm.p.vel_d;
+      gp.g_speed = gm.p.g_speed;
+      gp.head_mot = gm.p.head_mot;
+      gp.sensor_time_us = gm.p.sensor_time_us;
+      gp.packet_seq = g_gps_packet_seq++;
+      portENTER_CRITICAL(&g_pps_mux);
+      gp.pps_time_us = g_pps_time_us;
+      gp.pps_seq = g_pps_seq;
+      portEXIT_CRITICAL(&g_pps_mux);
+      gp.pps_age_ms =
+          gp.pps_time_us > 0 && gp.sensor_time_us >= gp.pps_time_us
+              ? (uint32_t)((gp.sensor_time_us - gp.pps_time_us) / 1000u)
+              : UINT32_MAX;
+ #else
       KppGpsPayload gp{};
       gp.itow = gm.p.itow;
       gp.lat = gm.p.lat;
@@ -601,6 +736,7 @@ static void fusionTxTask(void *) {
       gp.s_acc = gm.p.s_acc;
       gp.num_sv = gm.p.num_sv;
       gp.fix_type = gm.p.fix_type;
+ #endif
       g_last_gps_fix = gm.p.fix_type;
       g_last_gps_sv = gm.p.num_sv;
       enqueueFrame(KPP_TYPE_GPS, (const uint8_t *)&gp, sizeof(gp));
@@ -628,6 +764,8 @@ static void fusionTxTask(void *) {
       if (o.zupt_active) fp.flags |= KPP_FUSED_FLAG_ZUPT;
       if (o.gps_valid) fp.flags |= KPP_FUSED_FLAG_GPS;
       if (g_imu_fault) fp.flags |= KPP_FUSED_FLAG_IMU_FAULT;
+      if (g_mpu_active) fp.flags |= KPP_FUSED_FLAG_MPU_ACTIVE;
+      if (g_mpu_rejected) fp.flags |= KPP_FUSED_FLAG_MPU_REJECTED;
       enqueueFrame(KPP_TYPE_FUSED, (const uint8_t *)&fp, sizeof(fp));
       g_tx_fused++;
     }
@@ -644,7 +782,8 @@ static void uploadTask(void *) {
   // HTTPS POST 會 block 數秒；勿讓 TWDT 因 IDLE 餓死而 reboot
   esp_task_wdt_delete(nullptr);
 
-  uint8_t batch[kBatchMtu];
+  // Static: an 8 KiB HTTPS body must not consume most of the task stack.
+  static uint8_t batch[kBatchBytes];
   size_t batch_n = 0;
   uint32_t last_flush = millis();
   uint32_t last_diag = millis();
@@ -661,8 +800,8 @@ static void uploadTask(void *) {
     }
     g_wifi_ok = true;
 
-    while (batch_n < kBatchMtu) {
-      const size_t room = kBatchMtu - batch_n;
+    while (batch_n < kBatchBytes) {
+      const size_t room = kBatchBytes - batch_n;
       size_t got = 0;
       portENTER_CRITICAL(&uploadMux);
       // GPS 優先 drain
@@ -678,7 +817,7 @@ static void uploadTask(void *) {
     const uint32_t now = millis();
     const uint32_t flush_ms =
         ringSize() > ((kGpsRingCap + kImuRingCap) / 2) ? 10u : kFlushMs;
-    const bool full = batch_n >= kBatchMtu;
+    const bool full = batch_n >= kBatchBytes;
     const bool timed = batch_n > 0 && (now - last_flush) >= flush_ms;
     if (full || timed) {
       bool ok = false;
@@ -768,14 +907,22 @@ static void printDiag() {
       (unsigned)g_up_fail, g_last_http_code, (int)g_wifi_ok, (int)g_icm_ok,
       (unsigned)g_icm_reinit_n);
   const uint32_t gps_rx_bytes = gps.takeRxBytes();
-  KppDbgPayload db{};
-  db.gps_rx_bps = (uint16_t)(gps_rx_bytes > 65535 ? 65535 : gps_rx_bytes);
+  KppDbgPayloadV2 db{};
+  db.version = KPP_DBG_PAYLOAD_VERSION_2;
+  db.gps_rx_bps = gps_rx_bytes;
   db.pvt_hz = (uint8_t)(g_tx_gps > 255 ? 255 : g_tx_gps);
   db.fix_type = g_last_gps_fix;
   db.num_sv = g_last_gps_sv;
+  db.gps_queue_drops = g_drop_gps;
+  db.imu_queue_drops = g_drop_imu;
+  db.mpu_queue_drops = g_drop_mpu;
+  db.ring_drops = g_ring_drop;
+  db.gps_ring_drops = g_gps_ring_drop;
+  db.gps_parser_errors = gps.takeParserErrors();
+  db.gps_uart_overflows = 0;  // Arduino HardwareSerial exposes no overflow count.
   enqueueFrame(KPP_TYPE_DBG, (const uint8_t *)&db, sizeof(db));
   g_tx_imu = g_tx_mpu = g_tx_gps = g_tx_fused = 0;
-  g_drop_imu = g_drop_mpu = g_ring_drop = 0;
+  g_drop_imu = g_drop_mpu = g_drop_gps = g_ring_drop = 0;
   g_gps_ring_drop = 0;
   g_up_bytes = 0;
   g_up_fail = 0;
@@ -808,6 +955,15 @@ void setup() {
     Serial.println("[sensor_node] FATAL: no IMU available");
   }
   gps.configure(PIN_GPS_RX, PIN_GPS_TX);
+#if GNSS_PPS_PIN >= 0
+  pinMode(GNSS_PPS_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(GNSS_PPS_PIN), onGnssPps,
+                  GNSS_PPS_EDGE_FALLING ? FALLING : RISING);
+  Serial.printf("[gps] TIMEPULSE capture GPIO%d %s enabled\n", GNSS_PPS_PIN,
+                GNSS_PPS_EDGE_FALLING ? "falling" : "rising");
+#else
+  Serial.println("[gps] TIMEPULSE capture disabled (GNSS_PPS_PIN=-1)");
+#endif
 
   imuQ = xQueueCreate(64, sizeof(ImuMsg));
   mpuQ = xQueueCreate(32, sizeof(MpuMsg));
@@ -817,8 +973,15 @@ void setup() {
   ensureWifi();
 
   xTaskCreatePinnedToCore(sensorTask, "sensor", 8192, nullptr, 3, nullptr, 0);
+#if KPP_LEGACY_TASK_PRIORITIES
   xTaskCreatePinnedToCore(uploadTask, "upload", 12288, nullptr, 3, nullptr, 1);
   xTaskCreatePinnedToCore(fusionTxTask, "fusion", 12288, nullptr, 2, nullptr, 1);
+#else
+  // TLS may remain runnable for hundreds of ms.  Fusion must drain sensor
+  // queues first or the old priority order loses most IMU samples.
+  xTaskCreatePinnedToCore(uploadTask, "upload", 12288, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(fusionTxTask, "fusion", 12288, nullptr, 4, nullptr, 1);
+#endif
 
   Serial.println("[sensor_node] tasks up — cmds: d=diag s=status r=reset");
 }

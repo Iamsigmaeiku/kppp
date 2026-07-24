@@ -12,6 +12,7 @@ from services.postprocess.rts_smoother import (
     SmoothInput,
     hall_scale_m_per_rev,
     smooth_track,
+    smooth_track_ctrv,
     theil_sen_slope,
 )
 
@@ -161,6 +162,85 @@ def test_variable_dt_stable():
     assert all(math.isfinite(o.x_m) and math.isfinite(o.speed_mps) for o in out)
     # 末端應大致在直線上
     assert abs(out[-1].y_m) < 5.0
+
+
+def test_ctrv_smoother_preserves_turn_and_velocity_components():
+    rng = np.random.default_rng(44)
+    ts, x_true, y_true = _circle_truth(n=180, radius=35.0, period=42.0)
+    samples = []
+    for i, t in enumerate(ts):
+        angle = 2 * math.pi * i / len(ts)
+        # course is clockwise from north; tangent heading is angle + pi/2.
+        math_heading = angle + math.pi / 2
+        course = (90.0 - math.degrees(math_heading)) % 360.0
+        samples.append(
+            SmoothInput(
+                t=t,
+                x_m=float(x_true[i] + rng.normal(0, 1.5)),
+                y_m=float(y_true[i] + rng.normal(0, 1.5)),
+                hdop=0.8,
+                speed_mps=2 * math.pi * 35.0 / 42.0,
+                course_deg=course,
+                h_acc_m=1.2,
+            )
+        )
+    out = smooth_track_ctrv(samples)
+    assert len(out) == len(samples)
+    err = np.hypot(
+        np.array([o.x_m for o in out]) - x_true,
+        np.array([o.y_m for o in out]) - y_true,
+    )
+    assert float(np.mean(err)) < 2.0
+    assert all(math.isfinite(o.vx_mps) and math.isfinite(o.vy_mps) for o in out)
+
+
+def test_fixed_lag_rejects_unknown_model():
+    from services.postprocess.rts_smoother import FixedLagState, fixed_lag_commit
+
+    state = FixedLagState(samples=[])
+    with pytest.raises(ValueError, match="unsupported smoother model"):
+        fixed_lag_commit(
+            state,
+            [
+                SmoothInput(t=T0, x_m=0, y_m=0),
+                SmoothInput(t=T0 + timedelta(seconds=5), x_m=1, y_m=0),
+            ],
+            lag_sec=0,
+            model="unknown",
+        )
+
+
+@pytest.mark.parametrize("model", ["cv", "ctrv"])
+def test_real_timestamp_gap_splits_smoother(model):
+    samples = [
+        SmoothInput(t=T0, x_m=0, y_m=0, speed_mps=2, course_deg=90),
+        SmoothInput(
+            t=T0 + timedelta(seconds=0.1),
+            x_m=0.2,
+            y_m=0,
+            speed_mps=2,
+            course_deg=90,
+        ),
+        SmoothInput(
+            t=T0 + timedelta(seconds=10),
+            x_m=20,
+            y_m=20,
+            speed_mps=2,
+            course_deg=90,
+        ),
+        SmoothInput(
+            t=T0 + timedelta(seconds=10.1),
+            x_m=20.2,
+            y_m=20,
+            speed_mps=2,
+            course_deg=90,
+        ),
+    ]
+    out = smooth_track(samples) if model == "cv" else smooth_track_ctrv(samples)
+    assert out[1].gap
+    assert out[2].gap
+    assert abs(out[1].y_m) < 5
+    assert abs(out[2].y_m - 20) < 5
 
 
 def test_fixed_lag_commits_only_after_lag():

@@ -93,6 +93,7 @@ async def _run(args: argparse.Namespace) -> int:
             args.session_id,
             dry_run=args.dry_run,
             use_speed=not args.no_speed,
+            model=args.model,
         )
     finally:
         await reader.close()
@@ -132,7 +133,12 @@ async def _run(args: argparse.Namespace) -> int:
         for s in raw:
             lat, lon = local_m_to_latlng(s.x_m, s.y_m)
             raw_px.append(latlng_to_px(lat, lon))
-        smooth_px = [latlng_to_px(o.lat, o.lon) for o in result.outputs]
+        # A gap marker is a hard segment boundary.  NaN prevents matplotlib
+        # from drawing a fictitious straight line across missing measurements.
+        smooth_px = [
+            (float("nan"), float("nan")) if o.gap else latlng_to_px(o.lat, o.lon)
+            for o in result.outputs
+        ]
         gap_px = [latlng_to_px(o.lat, o.lon) for o in result.outputs if o.gap]
         _plot(
             track_png=track_png,
@@ -152,6 +158,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--no-speed", action="store_true", help="關掉 |v| 量測更新")
+    parser.add_argument("--model", choices=("cv", "ctrv"), default="cv")
     parser.add_argument("--out", default=None, help="plot 輸出路徑")
     args = parser.parse_args()
     return asyncio.run(_run(args))

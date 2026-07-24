@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 import time
@@ -34,12 +35,18 @@ from services.postprocess.rts_smoother import (
     SmoothOutput,
     fixed_lag_commit,
 )
+from services.timing.lap_timer import LapTimer, LapTiming, TimedState
 from services.webapp.track_coords import latlng_to_local_m
+from services.webapp.track_coords import (
+    GATE_FORWARD_BEARING_DEG,
+    START_GATE_A_M,
+    START_GATE_B_M,
+)
 
 logger = logging.getLogger("realtime_smoother")
 
 MEASUREMENT = "track_smoothed"
-ALGO = "rts_cv_lag"
+LAP_MEASUREMENT = "independent_lap"
 DEFAULT_DEVICE = "esp32-kart-01"
 
 
@@ -61,13 +68,19 @@ def _cfg() -> dict[str, str]:
     return {"url": url, "token": token, "org": org, "bucket": bucket}
 
 
-def _resolve_session_id(dashboard_base: str | None) -> str:
+def _resolve_session_id(
+    dashboard_base: str | None,
+    ingest_token: str | None = None,
+) -> str:
     """盡量從 chuck dashboard 拿 current session；失敗則 live。"""
     if not dashboard_base:
         return "live"
-    url = dashboard_base.rstrip("/") + "/api/session/current"
+    url = dashboard_base.rstrip("/") + "/api/telemetry/current-session"
     try:
-        req = urllib.request.Request(url, method="GET")
+        headers = {}
+        if ingest_token:
+            headers["Authorization"] = f"Bearer {ingest_token}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=2.5) as resp:
             import json
 
@@ -101,7 +114,8 @@ def _query_gps(
         f'and r.device_id == "{device_id}" and r.gps_fix == "1") '
         f'|> filter(fn: (r) => r._field == "gps_lat" or r._field == "gps_lon" '
         f'or r._field == "gps_hdop" or r._field == "gps_speed_mps" '
-        f'or r._field == "hall_hz") '
+        f'or r._field == "gps_course_deg" or r._field == "gps_h_acc_mm" '
+        f'or r._field == "pps_age_ms" or r._field == "hall_hz") '
         f'|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
         f'|> group() '
         f'|> sort(columns: ["_time"])'
@@ -118,6 +132,9 @@ def _query_gps(
             hdop = v.get("gps_hdop")
             speed = v.get("gps_speed_mps")
             hall = v.get("hall_hz")
+            course = v.get("gps_course_deg")
+            h_acc_mm = v.get("gps_h_acc_mm")
+            pps_age = v.get("pps_age_ms")
             out.append(
                 SmoothInput(
                     t=ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc),
@@ -126,6 +143,9 @@ def _query_gps(
                     hdop=float(hdop) if hdop is not None else None,
                     speed_mps=float(speed) if speed is not None else None,
                     hall_hz=float(hall) if hall is not None else None,
+                    course_deg=float(course) if course is not None else None,
+                    h_acc_m=float(h_acc_mm) / 1000.0 if h_acc_mm is not None else None,
+                    pps_age_ms=float(pps_age) if pps_age is not None else None,
                 )
             )
     return out
@@ -139,6 +159,7 @@ def _write(
     session_id: str,
     device_id: str,
     outputs: list[SmoothOutput],
+    model: str,
 ) -> None:
     if not outputs:
         return
@@ -149,15 +170,92 @@ def _write(
             Point(MEASUREMENT)
             .tag("device_id", device_id)
             .tag("session_id", session_id)
-            .tag("algo", ALGO)
+            .tag("algo", f"rts_{model}_lag")
             .field("lat_s", float(o.lat))
             .field("lon_s", float(o.lon))
             .field("speed_mps", float(o.speed_mps))
+            .field("vx_mps", float(o.vx_mps))
+            .field("vy_mps", float(o.vy_mps))
             .field("sigma_m", float(o.sigma_m))
             .field("gap", 1.0 if o.gap else 0.0)
             .time(o.t)
         )
     write_api.write(bucket=bucket, org=org, record=batch)
+
+
+def _clock_quality(pps_age_ms: float | None) -> str:
+    if pps_age_ms is None:
+        return "INVALID"
+    if pps_age_ms <= 1500.0:
+        return "LOCKED"
+    if pps_age_ms <= 10_000.0:
+        return "HOLDOVER"
+    return "INVALID"
+
+
+def _timed_state(o: SmoothOutput) -> TimedState:
+    return TimedState(
+        time_ns=round(o.t.timestamp() * 1e9),
+        x_m=o.x_m,
+        y_m=o.y_m,
+        vx_mps=o.vx_mps,
+        vy_mps=o.vy_mps,
+        position_sigma_m=o.sigma_m,
+        clock_quality=_clock_quality(o.pps_age_ms),
+        pps_age_ms=o.pps_age_ms,
+        in_pit=False,
+    )
+
+
+def process_lap_outputs(
+    timer: LapTimer,
+    outputs: list[SmoothOutput],
+    previous: SmoothOutput | None,
+) -> tuple[list[LapTiming], SmoothOutput | None]:
+    events: list[LapTiming] = []
+    prev = previous
+    for output in outputs:
+        if prev is not None and not prev.gap and not output.gap:
+            event = timer.update(_timed_state(prev), _timed_state(output))
+            if event is not None:
+                events.append(event)
+        prev = output
+    return events, prev
+
+
+def _write_laps(
+    client: InfluxDBClient,
+    *,
+    bucket: str,
+    org: str,
+    session_id: str,
+    device_id: str,
+    events: list[LapTiming],
+) -> None:
+    if not events:
+        return
+    records: list[Point] = []
+    for event in events:
+        point = (
+            Point(LAP_MEASUREMENT)
+            .tag("device_id", device_id)
+            .tag("session_id", session_id)
+            .tag("source", event.source)
+            .field("crossing_time_ns", int(event.crossing_time_ns))
+            .field("uncertainty_ms", float(event.uncertainty_ms))
+            .field("clock_quality", event.clock_quality)
+            .field("position_quality", event.position_quality)
+            .field("valid", bool(event.valid))
+            .time(event.crossing_time_ns)
+        )
+        if event.lap_time is not None:
+            point = point.field("lap_time", float(event.lap_time))
+        if event.pps_age_ms is not None:
+            point = point.field("pps_age_ms", float(event.pps_age_ms))
+        records.append(point)
+    client.write_api(write_options=SYNCHRONOUS).write(
+        bucket=bucket, org=org, record=records
+    )
 
 
 def run_loop(
@@ -168,11 +266,22 @@ def run_loop(
     keep_sec: float,
     dashboard_base: str | None,
     use_speed: bool,
+    lap_timer_enabled: bool,
+    model: str,
 ) -> None:
     cfg = _cfg()
+    ingest_token = os.environ.get("TELEMETRY_INGEST_TOKEN", "").strip()
     state = FixedLagState(samples=[])
     cursor = datetime.now(timezone.utc) - timedelta(seconds=max(15.0, lag_sec * 3))
     n_written = 0
+    bearing = math.radians(GATE_FORWARD_BEARING_DEG)
+    timer = LapTimer(
+        START_GATE_A_M,
+        START_GATE_B_M,
+        forward=(math.sin(bearing), math.cos(bearing)),
+    )
+    lap_previous: SmoothOutput | None = None
+    lap_session: str | None = None
     logger.info(
         "realtime smoother start device=%s lag=%.1fs influx=%s",
         device_id,
@@ -211,9 +320,10 @@ def run_loop(
                     lag_sec=lag_sec,
                     keep_sec=keep_sec,
                     use_speed=use_speed,
+                    model=model,
                 )
                 if committed:
-                    sid = _resolve_session_id(dashboard_base)
+                    sid = _resolve_session_id(dashboard_base, ingest_token)
                     _write(
                         client,
                         bucket=cfg["bucket"],
@@ -221,8 +331,29 @@ def run_loop(
                         session_id=sid,
                         device_id=device_id,
                         outputs=committed,
+                        model=model,
                     )
                     n_written += len(committed)
+                    if lap_timer_enabled:
+                        if lap_session != sid:
+                            timer = LapTimer(
+                                START_GATE_A_M,
+                                START_GATE_B_M,
+                                forward=(math.sin(bearing), math.cos(bearing)),
+                            )
+                            lap_previous = None
+                            lap_session = sid
+                        events, lap_previous = process_lap_outputs(
+                            timer, committed, lap_previous
+                        )
+                        _write_laps(
+                            client,
+                            bucket=cfg["bucket"],
+                            org=cfg["org"],
+                            session_id=sid,
+                            device_id=device_id,
+                            events=events,
+                        )
                     logger.info(
                         "commit n=%d session=%s last_t=%s total_written=%d buf=%d",
                         len(committed),
@@ -250,6 +381,17 @@ def main(argv: list[str] | None = None) -> int:
         help="chuck dashboard base（拿 current session_id）；空字串=永遠 live",
     )
     p.add_argument("--no-speed", action="store_true")
+    p.add_argument(
+        "--model",
+        choices=("cv", "ctrv"),
+        default=os.environ.get("RTS_MODEL", "cv").lower(),
+    )
+    p.add_argument(
+        "--lap-timer",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("LAP_TIMER_ENABLED", "0").lower()
+        in {"1", "true", "yes", "on"},
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -266,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
             keep_sec=args.keep,
             dashboard_base=dash,
             use_speed=not args.no_speed,
+            lap_timer_enabled=args.lap_timer,
+            model=args.model,
         )
     except KeyboardInterrupt:
         logger.info("stopped")

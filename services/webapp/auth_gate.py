@@ -21,6 +21,7 @@ _WHITELIST_PREFIXES = (
     "/api/auth/",
     "/api/telemetry/ingest",  # ESP32 Bearer token，不是瀏覽器 session
     "/api/telemetry/frame-ingest",
+    "/api/telemetry/current-session",  # Orin Bearer token，取得即時 session_id
     "/api/session/reset",  # 自帶 X-Session-Reset-Token，場務收場用
     "/health",  # keepalived / deploy 健康檢查
     "/version",  # deploy 確認 VIP 背後版本

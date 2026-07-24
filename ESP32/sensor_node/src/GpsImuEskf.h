@@ -24,6 +24,10 @@
 #define ESKF_CALIB_MS 2000u
 #endif
 
+#ifndef ESKF_NIS_GATE_ENABLE
+#define ESKF_NIS_GATE_ENABLE 1
+#endif
+
 enum class EskfPhase : uint8_t {
   CALIBRATING = 0,
   WAIT_GPS = 1,
@@ -97,6 +101,7 @@ class GpsImuEskf {
   void quatToEuler(float &yaw, float &pitch, float &roll) const;
   void bodyToNed(const float vb[3], float vn[3]) const;
   void setAttitudeFromGravity(float ax, float ay, float az);
+  void stabilizeCovariance();
 
   EskfPhase phase_;
   uint32_t calib_start_us_;

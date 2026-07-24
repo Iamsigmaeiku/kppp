@@ -47,6 +47,31 @@ def test_telemetry_ingest_rejects_bad_token(webapp_client):
     assert r.status_code == 401
 
 
+def test_telemetry_current_session_requires_token_and_returns_live_id(webapp_client):
+    from services.decoder_ingest.dashboard import set_session_manager
+    from services.decoder_ingest.session_manager import SessionManager
+
+    manager = SessionManager.start_new()
+    set_session_manager(manager, None)
+    try:
+        denied = webapp_client.get("/api/telemetry/current-session")
+        assert denied.status_code == 401
+
+        accepted = webapp_client.get(
+            "/api/telemetry/current-session",
+            headers={
+                "Authorization": (
+                    "Bearer "
+                    + webapp_client.app.state.web_config.telemetry_ingest_token
+                )
+            },
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["session_id"] == manager.current_session_id
+    finally:
+        set_session_manager(None, None)
+
+
 def test_me_returns_none_when_not_logged_in(webapp_client):
     r = webapp_client.get("/api/auth/me")
     assert r.status_code == 200

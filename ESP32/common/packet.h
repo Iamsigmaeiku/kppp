@@ -22,6 +22,8 @@
 #define KPP_FUSED_FLAG_ZUPT (1u << 1)
 #define KPP_FUSED_FLAG_GPS (1u << 2)
 #define KPP_FUSED_FLAG_IMU_FAULT (1u << 3)
+#define KPP_FUSED_FLAG_MPU_ACTIVE (1u << 4)
+#define KPP_FUSED_FLAG_MPU_REJECTED (1u << 5)
 
 #define KPP_IMU_SAMPLE_BYTES 18u
 #define KPP_IMU_MAX_SAMPLES 5u
@@ -53,6 +55,43 @@ typedef struct __attribute__((packed)) {
   uint8_t fix_type;
 } KppGpsPayload;
 
+/*
+ * GPS payload v2.  The frame type remains 0x02; receivers distinguish the
+ * payload by length and the leading version byte.  Keeping KppGpsPayload
+ * above is intentional so old firmware and captures remain decodable.
+ *
+ * UTC fields are the NAV-PVT measurement epoch. sensor_time_us is the
+ * ESP monotonic receive/capture epoch, never wall-clock or UDP receive time.
+ */
+#define KPP_GPS_PAYLOAD_VERSION_2 2u
+typedef struct __attribute__((packed)) {
+  uint8_t version;
+  uint8_t valid; /* NAV-PVT byte 11: validDate/validTime/fullyResolved */
+  uint16_t year;
+  uint8_t month, day, hour, minute, second;
+  uint8_t fix_type, num_sv, flags, flags2;
+  int32_t nano;
+  uint32_t itow;
+  uint32_t t_acc;
+  uint32_t h_acc;
+  uint32_t v_acc;
+  uint32_t s_acc;
+  uint32_t head_acc;
+  int32_t lat;
+  int32_t lon;
+  int32_t height;
+  int32_t vel_n;
+  int32_t vel_e;
+  int32_t vel_d;
+  int32_t g_speed;
+  int32_t head_mot;
+  uint64_t sensor_time_us;
+  uint32_t packet_seq;
+  uint64_t pps_time_us;
+  uint32_t pps_seq;
+  uint32_t pps_age_ms;
+} KppGpsPayloadV2;
+
 typedef struct __attribute__((packed)) {
   uint16_t gps_rx_bps;
   uint8_t pvt_hz;
@@ -60,6 +99,22 @@ typedef struct __attribute__((packed)) {
   uint8_t num_sv;
   uint8_t reserved;
 } KppDbgPayload;
+
+#define KPP_DBG_PAYLOAD_VERSION_2 2u
+typedef struct __attribute__((packed)) {
+  uint8_t version;
+  uint8_t pvt_hz;
+  uint8_t fix_type;
+  uint8_t num_sv;
+  uint32_t gps_rx_bps;
+  uint32_t gps_queue_drops;
+  uint32_t imu_queue_drops;
+  uint32_t mpu_queue_drops;
+  uint32_t ring_drops;
+  uint32_t gps_ring_drops;
+  uint32_t gps_parser_errors;
+  uint32_t gps_uart_overflows;
+} KppDbgPayloadV2;
 
 typedef struct __attribute__((packed)) {
   uint32_t ts_us;

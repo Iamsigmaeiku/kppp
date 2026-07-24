@@ -8,23 +8,28 @@ from __future__ import annotations
 
 import io
 import os
+import shlex
 import sys
 import tarfile
 import time
 from pathlib import Path
 
 import paramiko
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env", override=False)
 HOST = os.environ.get("KPP_ORIN_HOST", "100.80.172.49")
 USER = os.environ.get("KPP_ORIN_USER", "evan")
 PASS = os.environ.get("KPP_ORIN_PASS", os.environ.get("KPP_PI_PASS", "00000000"))
 CHUCK_INFLUX = os.environ.get("KPP_CHUCK_INFLUX", "http://100.102.122.104:8086")
 CHUCK_DASH = os.environ.get("KPP_CHUCK_DASH", "http://100.102.122.104:8000")
+TELEMETRY_INGEST_TOKEN = os.environ.get("TELEMETRY_INGEST_TOKEN", "")
 REMOTE_ROOT = "/home/evan/kpp"
 
 PACK = [
     "services/postprocess",
+    "services/timing",
     "services/webapp/track_coords.py",
     "services/decoder_ingest/config.py",  # dotenv path helper not required but ok
 ]
@@ -82,7 +87,13 @@ def pack() -> bytes:
     return buf.getvalue()
 
 
-SERVICE = f"""[Unit]
+def service_unit() -> str:
+    if not TELEMETRY_INGEST_TOKEN:
+        raise RuntimeError("缺少 TELEMETRY_INGEST_TOKEN，不能安全查詢目前場次")
+    # systemd Environment= 的值不經 shell；拒絕換行避免破壞 unit。
+    if any(ch in TELEMETRY_INGEST_TOKEN for ch in "\r\n"):
+        raise RuntimeError("TELEMETRY_INGEST_TOKEN 含非法換行")
+    return f"""[Unit]
 Description=KPP realtime fixed-lag RTS smoother
 After=network-online.target
 
@@ -95,8 +106,11 @@ Environment=INFLUX_TOKEN=kpp-dev-influx-token-change-me
 Environment=INFLUX_ORG=kpp
 Environment=INFLUX_BUCKET=decoder
 Environment=KPP_DASHBOARD_URL={CHUCK_DASH}
+EnvironmentFile=%h/.config/kpp/rts.env
 Environment=RTS_LAG_SEC=3
 Environment=RTS_POLL_SEC=0.5
+Environment=RTS_MODEL=ctrv
+Environment=LAP_TIMER_ENABLED=1
 ExecStart={REMOTE_ROOT}/.venv/bin/python -m services.postprocess.realtime_smoother -v
 Restart=on-failure
 RestartSec=3
@@ -139,13 +153,26 @@ def main() -> int:
 
         # write unit via sftp（避免 shell quoting）
         unit_path = "/home/evan/.config/systemd/user/kpp-rts-smoother.service"
-        run(c, "mkdir -p ~/.config/systemd/user")
+        env_path = "/home/evan/.config/kpp/rts.env"
+        run(c, "mkdir -p ~/.config/systemd/user ~/.config/kpp")
         sftp = c.open_sftp()
         with sftp.file(unit_path, "w") as f:
-            f.write(SERVICE)
+            f.write(service_unit())
+        with sftp.file(env_path, "w") as f:
+            f.write(
+                "TELEMETRY_INGEST_TOKEN="
+                + shlex.quote(TELEMETRY_INGEST_TOKEN)
+                + "\n"
+            )
+        sftp.chmod(env_path, 0o600)
         sftp.close()
         run(c, "systemctl --user daemon-reload", check=False)
-        run(c, "systemctl --user enable --now kpp-rts-smoother.service", check=False)
+        run(
+            c,
+            "systemctl --user enable kpp-rts-smoother.service && "
+            "systemctl --user restart kpp-rts-smoother.service",
+            check=False,
+        )
         time.sleep(2)
         run(
             c,

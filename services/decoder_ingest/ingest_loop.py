@@ -206,7 +206,22 @@ async def handle_feed_result(
             "last_lap_time": state["last_lap_time"] or 0.0,
             "best_lap_time": state["best_lap_time"] or 0.0,
             "decoder_id": decoder_id,
+            # Preserve both clocks. Point timestamp remains TCP receive time
+            # for backward compatibility; decoder_tick is the authoritative
+            # elapsed-time source whenever it decoded successfully.
+            "tcp_receive_time_ns": int(passing.received_at.timestamp() * 1e9),
+            "lap_time_source": (
+                "decoder_tick"
+                if passing.decoder_tick is not None
+                and passing.tick_byte_len is not None
+                and lap_tracker._decoder_tick_hz is not None
+                else "tcp_receive_fallback"
+            ),
         }
+        if passing.decoder_tick is not None:
+            passing_fields["decoder_tick"] = passing.decoder_tick
+        if passing.tick_byte_len is not None:
+            passing_fields["decoder_tick_byte_len"] = passing.tick_byte_len
         if session_id is not None:
             passing_fields["session_id"] = session_id
         await writer.enqueue(

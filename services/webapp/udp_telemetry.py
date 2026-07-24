@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import struct
 import time
-from datetime import datetime, timezone
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import FastAPI
 from influxdb_client import Point
@@ -83,6 +85,20 @@ GPS_REANCHOR_DRIFT_MS = 5_000  # |fix_time - now| 超過此值重新錨定（毫
 GPS_ITOW_WRAP_GUARD_MS = 1_000  # iTOW 回捲偵測：低於錨定值減此量（毫秒）
 DROP_WARN_INTERVAL_SEC = 30.0  # drop 統計警告間隔（秒）
 _EARTH_RADIUS_M = 6_371_000.0  # 地球半徑（公尺）
+GPS_V2_ENABLED = os.getenv("KPP_GPS_V2_ENABLED", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+
+# Stable numeric values are written to Influx and decoded by the audit CLI.
+GPS_GATE_ACCEPTED = 0
+GPS_GATE_FIX = 1
+GPS_GATE_SV = 2
+GPS_GATE_HACC = 3
+GPS_GATE_JUMP = 4
+GPS_GATE_TIME = 5
+GPS_GATE_REACQUIRE = 6
 
 
 def crc16_ccitt(data: bytes) -> int:
@@ -116,6 +132,7 @@ class FrameParser:
         self._len = 0
         self._idx = 0
         self._buf = bytearray(4 + 255 + 2)
+        self.crc_errors = 0
 
     def reset(self) -> None:
         self._state = 0
@@ -159,6 +176,7 @@ class FrameParser:
         frame = bytes(self._buf[:flen])
         self.reset()
         if got != expect:
+            self.crc_errors += 1
             return None
         return frame
 
@@ -227,7 +245,8 @@ def _parse_mpu(payload: bytes) -> list[TelemetrySample]:
     return out
 
 
-class GpsRawFields(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class GpsRawFields:
     itow: int
     lat: int
     lon: int
@@ -242,14 +261,132 @@ class GpsRawFields(NamedTuple):
     s_acc: int
     num_sv: int
     fix_type: int
+    version: int = 1
+    year: int | None = None
+    month: int | None = None
+    day: int | None = None
+    hour: int | None = None
+    minute: int | None = None
+    second: int | None = None
+    valid: int | None = None
+    t_acc: int | None = None
+    nano: int | None = None
+    flags: int | None = None
+    flags2: int | None = None
+    head_acc: int | None = None
+    sensor_time_us: int | None = None
+    packet_seq: int | None = None
+    pps_time_us: int | None = None
+    pps_seq: int | None = None
+    pps_age_ms: int | None = None
 
 
 def _parse_gps_raw(payload: bytes) -> GpsRawFields | None:
     """Unpack GPS payload；不做品質閘門。"""
+    if (
+        GPS_V2_ENABLED
+        and len(payload) >= 85
+        and payload[0] == 2
+    ):
+        f = struct.unpack_from("<BBHBBBBBBBBBiIIIIIIiiiiiiiiQI", payload, 0)
+        (
+            version,
+            valid,
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            fix_type,
+            num_sv,
+            flags,
+            flags2,
+            nano,
+            itow,
+            t_acc,
+            h_acc,
+            v_acc,
+            s_acc,
+            head_acc,
+            lat,
+            lon,
+            height,
+            vel_n,
+            vel_e,
+            vel_d,
+            g_speed,
+            head_mot,
+            sensor_time_us,
+            packet_seq,
+        ) = f
+        pps_time_us = pps_seq = pps_age_ms = None
+        if len(payload) >= 101:
+            pps_time_us, pps_seq, pps_age_ms = struct.unpack_from("<QII", payload, 85)
+        return GpsRawFields(
+            itow=itow,
+            lat=lat,
+            lon=lon,
+            height=height,
+            vel_n=vel_n,
+            vel_e=vel_e,
+            vel_d=vel_d,
+            g_speed=g_speed,
+            head_mot=head_mot,
+            h_acc=h_acc,
+            v_acc=v_acc,
+            s_acc=s_acc,
+            num_sv=num_sv,
+            fix_type=fix_type,
+            version=version,
+            year=year,
+            month=month,
+            day=day,
+            hour=hour,
+            minute=minute,
+            second=second,
+            valid=valid,
+            t_acc=t_acc,
+            nano=nano,
+            flags=flags,
+            flags2=flags2,
+            head_acc=head_acc,
+            sensor_time_us=sensor_time_us,
+            packet_seq=packet_seq,
+            pps_time_us=pps_time_us,
+            pps_seq=pps_seq,
+            pps_age_ms=pps_age_ms,
+        )
     if len(payload) < 50:
         return None
     fields = struct.unpack_from("<IiiiiiiiiIIIBB", payload, 0)
     return GpsRawFields(*fields)
+
+
+def _nav_pvt_utc_ns(raw: GpsRawFields) -> int | None:
+    """Convert NAV-PVT UTC+nano without involving server arrival time."""
+    if raw.version < 2 or raw.valid is None or (raw.valid & 0x03) != 0x03:
+        return None
+    if None in (raw.year, raw.month, raw.day, raw.hour, raw.minute, raw.second):
+        return None
+    try:
+        # datetime does not accept the leap-second value 60.  Represent it as
+        # 59 + one second; the raw second remains stored separately.
+        sec = min(int(raw.second), 59)
+        base = datetime(
+            int(raw.year),
+            int(raw.month),
+            int(raw.day),
+            int(raw.hour),
+            int(raw.minute),
+            sec,
+            tzinfo=timezone.utc,
+        )
+        if int(raw.second) == 60:
+            base += timedelta(seconds=1)
+        return int(base.timestamp()) * 1_000_000_000 + int(raw.nano or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _parse_fused(payload: bytes) -> TelemetrySample | None:
@@ -281,11 +418,39 @@ def _parse_fused(payload: bytes) -> TelemetrySample | None:
         dr_speed_mps=speed,
         gps_alt_m=height * 1e-3,
         imu_fault=1.0 if (flags & 0x08) else 0.0,
+        imu_source_code=2 if (flags & 0x10) else 1,
+        imu_reject_reason=1 if (flags & 0x20) else 0,
     )
 
 
 def _parse_dbg(payload: bytes) -> TelemetrySample | None:
     """0x05 sensor debug：即使還沒 0x02 GPS 包，也能顯示搜星數。"""
+    if len(payload) >= 36 and payload[0] == 2:
+        (
+            _version,
+            pvt_hz,
+            fix_type,
+            num_sv,
+            rx_bps,
+            gps_q,
+            imu_q,
+            mpu_q,
+            ring,
+            gps_ring,
+            parser_err,
+            uart_ovf,
+        ) = struct.unpack_from("<BBBBIIIIIIII", payload, 0)
+        return TelemetrySample(
+            gps_satellites=float(num_sv),
+            gps_fresh=1.0 if fix_type >= 3 else (0.5 if fix_type >= 2 else 0.0),
+            gps_rx_bps=rx_bps,
+            gps_queue_drops=gps_q,
+            queue_drops=imu_q + mpu_q,
+            ring_drops=ring,
+            gps_ring_drops=gps_ring,
+            gps_parser_errors=parser_err,
+            gps_uart_overflows=uart_ovf,
+        )
     if len(payload) < 6:
         return None
     _rx_bps, _pvt_hz, fix_type, num_sv, _res = struct.unpack_from("<HBBBB", payload, 0)
@@ -335,6 +500,11 @@ class UdpTelemetryServer:
         # 跳點剔除狀態
         self._last_accepted_gps: tuple[float, float, float] | None = None
         self._rejected_streak = 0
+        self._gps_recovery_state = "NORMAL"
+        self._reacquire_candidates: list[tuple[float, float, float]] = []
+        self._last_packet_seq: int | None = None
+        self._packet_seq_gaps = 0
+        self._influx_write_failures = 0
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -402,6 +572,7 @@ class UdpTelemetryServer:
             self._ok += 1
             frames += 1
             self._handle_frame(frame)
+        self._crc_err = self._parser.crc_errors
         return frames
 
     def _on_datagram(self, data: bytes) -> None:
@@ -450,38 +621,56 @@ class UdpTelemetryServer:
         return fix_ms
 
     def _accept_gps_jump(
-        self, lat: float, lon: float, fix_time_s: float
+        self,
+        lat: float,
+        lon: float,
+        fix_time_s: float,
+        *,
+        h_acc_m: float = 5.0,
+        reported_speed_mps: float = 0.0,
     ) -> bool:
-        """跳點剔除：速度 > GPS_MAX_SPEED_MPS 拒收；連續飛點後重置基準。"""
+        """Dynamic jump gate with explicit DEGRADED/REACQUIRE states.
+
+        A rejected cluster is never made the new anchor merely because a
+        counter reached N.  It must also remain physically reachable from the
+        last accepted point.  This removes the old five-flypoints re-anchor.
+        """
         prev = self._last_accepted_gps
         if prev is None:
             self._last_accepted_gps = (lat, lon, fix_time_s)
             self._rejected_streak = 0
+            self._gps_recovery_state = "NORMAL"
             return True
 
         prev_lat, prev_lon, prev_t = prev
         dt = fix_time_s - prev_t
         if dt <= 0:
-            # 同時間或倒退：當跳點拒收，但仍計 streak
             self._rejected_streak += 1
-            if self._rejected_streak >= GPS_JUMP_RESET_STREAK:
-                self._last_accepted_gps = (lat, lon, fix_time_s)
-                self._rejected_streak = 0
-                return True
+            self._gps_recovery_state = "DEGRADED"
             return False
 
         dist = _haversine_m(prev_lat, prev_lon, lat, lon)
         speed = dist / dt
-        if speed > GPS_MAX_SPEED_MPS:
+        dynamic_max = max(
+            GPS_MAX_SPEED_MPS,
+            reported_speed_mps + 8.0,
+            (4.0 * max(h_acc_m, 0.5)) / max(dt, 0.05),
+        )
+        if speed > dynamic_max:
             self._rejected_streak += 1
-            if self._rejected_streak >= GPS_JUMP_RESET_STREAK:
-                self._last_accepted_gps = (lat, lon, fix_time_s)
-                self._rejected_streak = 0
-                return True
+            self._gps_recovery_state = (
+                "REACQUIRE"
+                if self._rejected_streak >= GPS_JUMP_RESET_STREAK
+                else "DEGRADED"
+            )
+            self._reacquire_candidates.append((lat, lon, fix_time_s))
+            self._reacquire_candidates = self._reacquire_candidates[-GPS_JUMP_RESET_STREAK:]
             return False
 
         self._last_accepted_gps = (lat, lon, fix_time_s)
         self._rejected_streak = 0
+        self._reacquire_candidates.clear()
+        self._gps_recovery_state = "NORMAL"
         return True
 
     def _handle_gps_payload(self, payload: bytes) -> TelemetrySample | None:
@@ -489,33 +678,84 @@ class UdpTelemetryServer:
         if raw is None:
             return None
 
+        receive_ns = time.time_ns()
+        gnss_ns = _nav_pvt_utc_ns(raw)
+        common: dict[str, Any] = {
+            "gps_lat": raw.lat * 1e-7,
+            "gps_lon": raw.lon * 1e-7,
+            "gps_alt_m": raw.height * 1e-3,
+            "gps_speed_mps": raw.g_speed * 1e-3,
+            "gps_course_deg": raw.head_mot * 1e-5,
+            "gps_satellites": raw.num_sv,
+            "gps_itow_ms": raw.itow,
+            "gps_year": raw.year,
+            "gps_month": raw.month,
+            "gps_day": raw.day,
+            "gps_hour": raw.hour,
+            "gps_minute": raw.minute,
+            "gps_second": raw.second,
+            "gps_nano": raw.nano,
+            "gps_valid_flags": raw.valid,
+            "gps_t_acc_ns": raw.t_acc,
+            "gps_fix_type": raw.fix_type,
+            "gps_flags": raw.flags,
+            "gps_flags2": raw.flags2,
+            "gps_h_acc_mm": raw.h_acc,
+            "gps_v_acc_mm": raw.v_acc,
+            "gps_s_acc_mmps": raw.s_acc,
+            "gps_head_acc_1e5deg": raw.head_acc,
+            "gps_vel_n_mmps": raw.vel_n,
+            "gps_vel_e_mmps": raw.vel_e,
+            "gps_vel_d_mmps": raw.vel_d,
+            "gps_packet_seq": raw.packet_seq,
+            "sensor_time_us": raw.sensor_time_us,
+            "gnss_time_ns": gnss_ns,
+            "receive_time_ns": receive_ns,
+            "pps_time_us": raw.pps_time_us,
+            "pps_seq": raw.pps_seq,
+            "pps_age_ms": raw.pps_age_ms,
+        }
+        if raw.packet_seq is not None:
+            if self._last_packet_seq is not None:
+                delta = (raw.packet_seq - self._last_packet_seq) & 0xFFFFFFFF
+                if 1 < delta < 0x80000000:
+                    self._packet_seq_gaps += delta - 1
+            self._last_packet_seq = raw.packet_seq
+
         if (
             raw.fix_type < GPS_MIN_FIX_TYPE
-            or raw.num_sv < GPS_MIN_SV
-            or raw.h_acc > GPS_MAX_H_ACC_MM
         ):
-            return TelemetrySample(
-                gps_fresh=0.0, gps_satellites=raw.num_sv
-            )
+            return TelemetrySample(**common, gps_fresh=0.0, gps_gate_accepted=0, gps_gate_reason=GPS_GATE_FIX)
+        if raw.num_sv < GPS_MIN_SV:
+            return TelemetrySample(**common, gps_fresh=0.0, gps_gate_accepted=0, gps_gate_reason=GPS_GATE_SV)
+        if raw.h_acc > GPS_MAX_H_ACC_MM:
+            return TelemetrySample(**common, gps_fresh=0.0, gps_gate_accepted=0, gps_gate_reason=GPS_GATE_HACC)
 
-        fix_ms = self._rebuild_fix_time(raw.itow)
+        fix_ms = gnss_ns // 1_000_000 if gnss_ns is not None else self._rebuild_fix_time(raw.itow)
         lat = raw.lat * 1e-7
         lon = raw.lon * 1e-7
-        if not self._accept_gps_jump(lat, lon, fix_ms / 1000.0):
+        if not self._accept_gps_jump(
+            lat,
+            lon,
+            fix_ms / 1000.0,
+            h_acc_m=raw.h_acc * 1e-3,
+            reported_speed_mps=raw.g_speed * 1e-3,
+        ):
             return TelemetrySample(
-                gps_fresh=0.0, gps_satellites=raw.num_sv
+                **common,
+                gps_fresh=0.0,
+                gps_gate_accepted=0,
+                gps_gate_reason=GPS_GATE_JUMP,
+                ts_ms=fix_ms,
             )
 
         h_acc_m = raw.h_acc * 1e-3
         return TelemetrySample(
-            gps_lat=lat,
-            gps_lon=lon,
-            gps_alt_m=raw.height * 1e-3,
-            gps_speed_mps=raw.g_speed * 1e-3,
-            gps_course_deg=raw.head_mot * 1e-5,
+            **common,
             gps_hdop=max(h_acc_m / 5.0, 0.5),
-            gps_satellites=raw.num_sv,
             gps_fresh=1.0,
+            gps_gate_accepted=1,
+            gps_gate_reason=GPS_GATE_ACCEPTED,
             ts_ms=fix_ms,
         )
 
@@ -573,6 +813,9 @@ class UdpTelemetryServer:
         if typ == TYPE_DBG:
             s = _parse_dbg(payload)
             if s is not None:
+                s.crc_errors = self._crc_err
+                s.server_queue_drops = self._gps_drops + self._imu_drops
+                s.influx_write_failures = self._influx_write_failures
                 self._enqueue(s, gps=False)
 
     def _update_cache(self, sample: TelemetrySample) -> None:
@@ -672,6 +915,7 @@ class UdpTelemetryServer:
                 bucket=influx_cfg.bucket, org=influx_cfg.org, record=points
             )
         except Exception:
+            self._influx_write_failures += 1
             logger.exception("udp telemetry influx write failed")
 
         try:

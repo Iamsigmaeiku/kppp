@@ -305,7 +305,26 @@ def split_by_session(
 
     train_idx = meta.index[meta["session_id"].isin(train_s)].to_numpy()
     val_idx = meta.index[meta["session_id"].isin(val_s if isinstance(val_s, list) else [val_s])].to_numpy()
+    assert_no_group_leakage(meta, train_idx, val_idx)
     return train_idx, val_idx, mode
+
+
+def assert_no_group_leakage(
+    meta: pd.DataFrame,
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    *,
+    group_columns: tuple[str, ...] = ("session_id", "day", "kart_id"),
+) -> None:
+    """Fail closed when any available session/day/kart group crosses the split."""
+    for column in group_columns:
+        if column not in meta.columns:
+            continue
+        train_groups = set(meta.loc[train_idx, column].dropna().astype(str))
+        val_groups = set(meta.loc[val_idx, column].dropna().astype(str))
+        overlap = sorted(train_groups & val_groups)
+        if overlap:
+            raise ValueError(f"dataset leakage in {column}: {overlap[:5]}")
 
 
 def save_dataset(out: dict, path: Path | None = None) -> Path:

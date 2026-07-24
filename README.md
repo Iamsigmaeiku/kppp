@@ -61,6 +61,9 @@ python -m services.decoder_ingest.main --replay services/decoder_ingest/raw_capt
 
 # 跑測試
 python -m pytest tests/ -q
+
+# 稽核單一真實 session（JSON + raw/accepted/fused/smoothed 疊圖）
+python scripts/audit_position_timing.py --session-id sess-YYYYMMDD-HHMMSS --plot
 ```
 
 ## Pi（chuck）部署

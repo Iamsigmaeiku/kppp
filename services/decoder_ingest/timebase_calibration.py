@@ -39,35 +39,56 @@ def _median_abs_err(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.median(np.abs(a[:n] - b[:n])))
 
 
-def _best_lag_align(
-    dec_laps: np.ndarray, gps_laps: np.ndarray, *, max_lag: int = 3
-) -> tuple[int, int, int]:
-    """回傳 (dec_start, gps_start, length) 使圈速序列 MAE 最小。
+def align_lap_sequences(
+    dec_laps: np.ndarray, gps_laps: np.ndarray
+) -> list[tuple[int, int]]:
+    """Smith-Waterman alignment of lap intervals.
 
-    lag>0：decoder 序列相對 GPS 往後錯（丟掉 decoder 前 lag 圈）。
-    同時掃兩邊起點偏移以容忍單邊漏圈。
+    Unlike the old fixed ±3 offset scan, gaps may occur anywhere.  This
+    tolerates a missing decoder passing, missing GNSS crossing, duplicate
+    crossing, and a session that starts mid-sequence.  Returned indices refer
+    to lap intervals; event ``i + 1`` is that interval's ending crossing.
     """
-    best = (0, 0, 0)
-    best_mae = float("inf")
-    if len(dec_laps) == 0 or len(gps_laps) == 0:
-        return best
-
-    for dec_off in range(0, max_lag + 1):
-        for gps_off in range(0, max_lag + 1):
-            d = dec_laps[dec_off:]
-            g = gps_laps[gps_off:]
-            n = min(len(d), len(g))
-            if n < 1:
-                continue
-            mae = _median_abs_err(d[:n], g[:n])
-            # 偏好更長對齊；MAE 相近時取較長
-            score = mae - 0.001 * n
-            if score < best_mae - 1e-12 or (
-                abs(score - best_mae) < 1e-12 and n > best[2]
-            ):
-                best_mae = score
-                best = (dec_off, gps_off, n)
-    return best
+    nd, ng = len(dec_laps), len(gps_laps)
+    if nd == 0 or ng == 0:
+        return []
+    score = np.zeros((nd + 1, ng + 1), dtype=float)
+    trace = np.zeros((nd + 1, ng + 1), dtype=np.int8)  # 1 match, 2 up, 3 left
+    best = (0.0, 0, 0)
+    gap_penalty = 1.5
+    for i in range(1, nd + 1):
+        for j in range(1, ng + 1):
+            err = abs(float(dec_laps[i - 1]) - float(gps_laps[j - 1]))
+            match_reward = 3.0 - 0.5 * min(err, 20.0)
+            choices = (
+                0.0,
+                score[i - 1, j - 1] + match_reward,
+                score[i - 1, j] - gap_penalty,
+                score[i, j - 1] - gap_penalty,
+            )
+            k = int(np.argmax(choices))
+            score[i, j] = choices[k]
+            trace[i, j] = k
+            if score[i, j] > best[0]:
+                best = (float(score[i, j]), i, j)
+    _, i, j = best
+    pairs: list[tuple[int, int]] = []
+    while i > 0 and j > 0 and score[i, j] > 0:
+        k = int(trace[i, j])
+        if k == 1:
+            err = abs(float(dec_laps[i - 1]) - float(gps_laps[j - 1]))
+            if err <= 8.0:
+                pairs.append((i - 1, j - 1))
+            i -= 1
+            j -= 1
+        elif k == 2:
+            i -= 1
+        elif k == 3:
+            j -= 1
+        else:
+            break
+    pairs.reverse()
+    return pairs
 
 
 def calibrate(
@@ -95,21 +116,18 @@ def calibrate(
             # 仍嘗試對齊，但後面 quality 會反映
             pass
 
-    dec_off, gps_off, n = _best_lag_align(dec_laps, gps_laps, max_lag=3)
-    if n < 1:
+    aligned = align_lap_sequences(dec_laps, gps_laps)
+    if not aligned:
         return failed
 
-    # 對齊後的事件：用圈速差分的「結束事件」配對
-    # decoder_passings[i+1] 對應 lap ending at that passing
-    # 配對：dec_passings[dec_off+1 : dec_off+1+n] ↔ gps_crossings[gps_off+1 : gps_off+1+n]
-    dec_ev = decoder_passings[dec_off + 1 : dec_off + 1 + n]
-    gps_ev = gps_crossings[gps_off + 1 : gps_off + 1 + n]
+    dec_ev = [decoder_passings[i + 1] for i, _ in aligned]
+    gps_ev = [gps_crossings[j + 1] for _, j in aligned]
     if len(dec_ev) != len(gps_ev) or not dec_ev:
         return failed
 
     # 對齊品質：對齊後圈速 MAE
-    d_seg = dec_laps[dec_off : dec_off + n]
-    g_seg = gps_laps[gps_off : gps_off + n]
+    d_seg = np.array([dec_laps[i] for i, _ in aligned], dtype=float)
+    g_seg = np.array([gps_laps[j] for _, j in aligned], dtype=float)
     lap_mae = float(np.median(np.abs(d_seg - g_seg)))
     # 圈速對不上（例如 >8s MAE）視為無關
     if lap_mae > 8.0:

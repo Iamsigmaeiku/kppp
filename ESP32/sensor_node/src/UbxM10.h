@@ -9,6 +9,11 @@
 
 struct UbxPvt {
   uint32_t itow;
+  uint16_t year;
+  uint8_t month, day, hour, minute, second;
+  uint8_t valid_flags;
+  uint32_t t_acc;
+  int32_t nano;
   int32_t lat;
   int32_t lon;
   int32_t height;
@@ -20,8 +25,12 @@ struct UbxPvt {
   uint32_t h_acc;
   uint32_t v_acc;
   uint32_t s_acc;
+  uint32_t head_acc;
   uint8_t num_sv;
   uint8_t fix_type;
+  uint8_t flags;
+  uint8_t flags2;
+  uint64_t sensor_time_us;
   bool valid;
 };
 
@@ -36,10 +45,12 @@ class UbxM10 {
 
   /** Bytes read since last call (GPS UART activity). */
   uint32_t takeRxBytes();
+  uint32_t takeParserErrors();
 
  private:
   HardwareSerial &ser_;
   uint32_t rx_bytes_ = 0;
+  uint32_t parser_errors_ = 0;
   int rx_ = 16;
   int tx_ = 17;
   uint8_t state_ = 0;
@@ -47,11 +58,17 @@ class UbxM10 {
   uint16_t len_ = 0, idx_ = 0;
   uint8_t ck_a_ = 0, ck_b_ = 0;
   uint8_t payload_[92];
+  bool ack_seen_ = false;
+  bool ack_ok_ = false;
+  uint8_t ack_cls_ = 0;
+  uint8_t ack_id_ = 0;
 
   void sendValSet(uint8_t layers, const uint32_t *keys, const uint32_t *vals,
                   size_t n);
   void sendBaud115200();
   void sendNavConfig();
+  void sendTimePulseConfig();
+  bool waitForAck(uint8_t cls, uint8_t id, uint32_t timeout_ms);
   void resetParser();
   bool handlePayload(UbxPvt &out);
 };

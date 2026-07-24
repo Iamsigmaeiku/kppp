@@ -25,6 +25,8 @@ constexpr float kGyroVarTh = 0.02f * 0.02f;   // (rad/s)^2
 constexpr float kAccelVarTh = 0.05f * 0.05f;  // g^2
 constexpr float kPosSigmaFloorM = 0.5f;
 constexpr float kVelSigmaFloor = 0.1f;
+/* chi-square 6 dof, 99.9%; deliberately wider than a 95% normal gate. */
+constexpr float kGpsNisGate6D = 22.46f;
 
 constexpr int kN = 15;
 
@@ -196,21 +198,15 @@ void GpsImuEskf::quatToEuler(float &yaw, float &pitch, float &roll) const {
 }
 
 void GpsImuEskf::setAttitudeFromGravity(float ax, float ay, float az) {
-  // accel ≈ -g in body when static if NED and accel measures specific force?
-  // ICM reports +1g when axis points up (typical). In NED, gravity vector in
-  // nav is [0,0,+g] (down). Specific force f = a - g_body... For level:
-  // roll/pitch from accel assuming stationary, yaw left at 0.
+  // Body frame is x-forward/y-right/z-down. At rest, specific force is -Z.
   const float an =
       std::sqrt(ax * ax + ay * ay + az * az);
   if (an < 0.1f) return;
   const float nx = ax / an;
   const float ny = ay / an;
   const float nz = az / an;
-  // Assume accel reads +1g on axis opposite gravity when upright (Z up board).
-  // Map: pitch/roll so that body -Z aligns with NED down if board flat Z-up.
-  // Simplified: roll = atan2(ay, az), pitch = atan2(-ax, sqrt(ay^2+az^2))
-  const float roll = std::atan2(ny, nz);
-  const float pitch = std::atan2(-nx, std::sqrt(ny * ny + nz * nz));
+  const float roll = std::atan2(-ny, -nz);
+  const float pitch = std::atan2(nx, std::sqrt(ny * ny + nz * nz));
   const float yaw = 0.0f;
   const float cr = std::cos(roll * 0.5f), sr = std::sin(roll * 0.5f);
   const float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
@@ -284,6 +280,18 @@ void GpsImuEskf::injectError() {
   std::memset(dx_, 0, sizeof(dx_));
 }
 
+void GpsImuEskf::stabilizeCovariance() {
+  for (int i = 0; i < kN; i++) {
+    if (!finiteF(P_[i * kN + i]) || P_[i * kN + i] < 1e-9f)
+      P_[i * kN + i] = 1e-9f;
+    for (int j = i + 1; j < kN; j++) {
+      const float s = 0.5f * (P_[i * kN + j] + P_[j * kN + i]);
+      P_[i * kN + j] = s;
+      P_[j * kN + i] = s;
+    }
+  }
+}
+
 void GpsImuEskf::predict(float dt, const float f_body[3], const float w_body[3]) {
   // nominal
   float f_ned[3];
@@ -342,6 +350,7 @@ void GpsImuEskf::predict(float dt, const float f_body[3], const float w_body[3])
     matAddDiag(P_, kIbg + i, kQBg * dt);
     matAddDiag(P_, kIba + i, kQBa * dt);
   }
+  stabilizeCovariance();
 }
 
 void GpsImuEskf::correctPosVel(const float p_meas[3], const float v_meas[3],
@@ -380,6 +389,7 @@ void GpsImuEskf::correctPosVel(const float p_meas[3], const float v_meas[3],
   }
   last_innov_pos_ = std::sqrt(innov_p);
   last_innov_vel_ = std::sqrt(innov_v);
+  stabilizeCovariance();
 }
 
 void GpsImuEskf::correctYaw(float yaw_meas_rad, float sigma_rad) {
@@ -402,6 +412,7 @@ void GpsImuEskf::correctYaw(float yaw_meas_rad, float sigma_rad) {
   matMul(gIKH, P_, gPn);
   std::memcpy(P_, gPn, sizeof(float) * kN * kN);
   injectError();
+  stabilizeCovariance();
 }
 
 void GpsImuEskf::zeroVelocityUpdate() {
@@ -425,6 +436,7 @@ void GpsImuEskf::zeroVelocityUpdate() {
     injectError();
   }
   zupt_count_++;
+  stabilizeCovariance();
 }
 
 void GpsImuEskf::onImu(const EskfImuIn &imu) {
@@ -540,18 +552,37 @@ void GpsImuEskf::onGps(const EskfGpsIn &gps) {
   if (v_acc < kPosSigmaFloorM) v_acc = kPosSigmaFloorM;
   if (s_acc < kVelSigmaFloor) s_acc = kVelSigmaFloor;
 
-  const float innov =
-      std::sqrt((pn - p_[0]) * (pn - p_[0]) + (pe - p_[1]) * (pe - p_[1]));
-  const float gate = ESKF_OUTLIER_GATE_SIGMA * h_acc;
-  if (innov > gate && gps.g_speed < ESKF_COURSE_MIN_SPEED_MPS) {
+  const float r_pos[3] = {h_acc * h_acc, h_acc * h_acc, v_acc * v_acc};
+  const float r_vel[3] = {s_acc * s_acc, s_acc * s_acc, s_acc * s_acc * 4.0f};
+  const float ip[3] = {pn - p_[0], pe - p_[1], pd - p_[2]};
+  const float iv[3] = {gps.vn - v_[0], gps.ve - v_[1], gps.vd - v_[2]};
+  last_innov_pos_ =
+      std::sqrt(ip[0] * ip[0] + ip[1] * ip[1] + ip[2] * ip[2]);
+  last_innov_vel_ =
+      std::sqrt(iv[0] * iv[0] + iv[1] * iv[1] + iv[2] * iv[2]);
+#if ESKF_NIS_GATE_ENABLE
+  float nis = 0.0f;
+  for (int i = 0; i < 3; i++) {
+    nis += ip[i] * ip[i] / (P_[(kIp + i) * kN + (kIp + i)] + r_pos[i]);
+    nis += iv[i] * iv[i] / (P_[(kIv + i) * kN + (kIv + i)] + r_vel[i]);
+  }
+  if (!finiteF(nis) || nis > kGpsNisGate6D) {
+    gps_valid_ = false;
 #if ESKF_DEBUG
-    std::printf("[eskf] GPS outlier innov=%.2f gate=%.2f\n", innov, gate);
+    std::printf("[eskf] GPS NIS reject nis=%.2f pos=%.2f vel=%.2f\n", nis,
+                last_innov_pos_, last_innov_vel_);
 #endif
     return;
   }
-
-  const float r_pos[3] = {h_acc * h_acc, h_acc * h_acc, v_acc * v_acc};
-  const float r_vel[3] = {s_acc * s_acc, s_acc * s_acc, s_acc * s_acc * 4.0f};
+#else
+  const float innov = std::sqrt(ip[0] * ip[0] + ip[1] * ip[1]);
+  const float gate = ESKF_OUTLIER_GATE_SIGMA * h_acc;
+  if (innov > gate && gps.g_speed < ESKF_COURSE_MIN_SPEED_MPS) {
+    gps_valid_ = false;
+    return;
+  }
+#endif
+  gps_valid_ = true;
   correctPosVel(p_meas, v_meas, r_pos, r_vel);
 
   if (gps.g_speed > ESKF_COURSE_MIN_SPEED_MPS && finiteF(gps.head_mot_deg)) {

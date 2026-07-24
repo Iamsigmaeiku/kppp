@@ -61,8 +61,8 @@ def test_jump_filter_rejects_single_flyer():
     assert srv._last_accepted_gps == (lat0, lon0, t0)
 
 
-def test_jump_filter_resets_after_streak():
-    """連續 5 筆飛點後重置 — 第 6 筆被接受，基準更新。"""
+def test_jump_filter_never_reanchors_to_repeated_flypoints():
+    """連續飛點只能進 REACQUIRE，不得因計數達門檻而換 anchor。"""
     srv = _make_server()
     lat0, lon0, t0 = 25.0, 121.0, 1000.0
     assert srv._accept_gps_jump(lat0, lon0, t0) is True
@@ -79,14 +79,13 @@ def test_jump_filter_resets_after_streak():
             assert srv._rejected_streak == i
             assert srv._last_accepted_gps == (lat0, lon0, t0)
         else:
-            # 第 5 筆：streak 達門檻，重置並接受
-            assert accepted is True
-            assert srv._rejected_streak == 0
-            assert srv._last_accepted_gps == (lat_fly, lon0, t)
+            assert accepted is False
+            assert srv._gps_recovery_state == "REACQUIRE"
+            assert srv._last_accepted_gps == (lat0, lon0, t0)
 
-    assert last_fly is not None
-    # 第 6 筆：相對新基準正常移動 → 接受
-    lat6 = _offset_lat(last_fly, 10.0)
+    # 回到物理可達的舊軌跡才恢復 NORMAL。
+    lat6 = _offset_lat(lat0, 10.0)
     t6 = t0 + float(GPS_JUMP_RESET_STREAK) + 1.0
     assert srv._accept_gps_jump(lat6, lon0, t6) is True
     assert srv._last_accepted_gps == (lat6, lon0, t6)
+    assert srv._gps_recovery_state == "NORMAL"
